@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>뜻겹</title>
+  <link rel="stylesheet" href="/style.css"/>
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <h1>뜻겹</h1>
+      <div class="sub">우리말샘(OpenDict) 기반 • 하루 1개 정답</div>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="k">시도</div><div class="v" id="triesCount">0</div></div>
+      <div class="stat"><div class="k">경과</div><div class="v" id="elapsed">00:00</div></div>
+      <div class="stat"><div class="k">오늘 최고</div><div class="v" id="bestPct">0%</div></div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="card">
+      <div class="row">
+        <form id="guessForm" class="guessForm" autocomplete="off">
+          <input id="guessInput" class="guessInput" placeholder="단어를 입력하고 Enter (예: 사과)" maxlength="20"/>
+          <button class="btn primary" type="submit">추론</button>
+        </form>
+        <div class="actions">
+          <button class="btn" id="newGameBtn" type="button">새 게임</button>
+          <button class="btn danger" id="giveUpBtn" type="button">포기하기</button>
+        </div>
+      </div>
+      <div class="msg" id="msg"></div>
+    </section>
+
+    <section class="card">
+      <div class="cardHead">
+        <h2>입력 누적</h2>
+        <div class="hintSmall">유사도 높은 순으로 정렬됩니다.</div>
+      </div>
+      <div id="guessList" class="guessList"></div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <div class="footInner">
+      <span id="dateKey"></span>
+      <span class="dot">•</span>
+      <a href="/api/meta" target="_blank" rel="noreferrer">API 상태</a>
+    </div>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

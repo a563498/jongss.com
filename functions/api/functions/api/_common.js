@@ -23,6 +23,22 @@ export function seoulDateKey(){
   return k;
 }
 
+
+function getKV(env){
+  // IMPORTANT: KV는 "Variables"가 아니라 "Bindings(KV namespace)"로 연결되어야 함
+  const kv = env && (env.TTEUTGYOP_KV || env.TTEUTGYOOP_KV || env.TTEUTGYEOP_KV || env.TTEUTGYOPKV || env.KV);
+  if (!kv) return { ok:false, message:"KV 바인딩(TTEUTGYOP_KV)이 없어요. Pages > Settings > Bindings에서 KV namespace를 추가하세요." };
+  if (typeof kv.get !== "function" || typeof kv.put !== "function"){
+    return { ok:false, message:"KV가 '바인딩'이 아니라 문자열로 들어왔어요. Variables and Secrets에 TTEUTGYOP_KV를 넣지 말고, Bindings에서 KV namespace로 연결해야 합니다." };
+  }
+  return { ok:true, kv };
+}
+
+function getOpenDictKey(env){
+  const key = env && (env.OPENDICT_KEY || env.OPENDICTKEY || env.OPENDICT_API_KEY);
+  if (!key) return { ok:false, message:"OPENDICT_KEY가 없어요. Pages > Settings > Variables and Secrets(Production)에 추가하세요." };
+  return { ok:true, key:String(key).trim() };
+}
 // Normalize/clean headword
 export function stripCaret(s){
   if (s==null) return "";
@@ -141,7 +157,8 @@ export async function lookupWord(env, word){
   const q = normalizeWord(word);
   if (!q) return { ok:false, status:400, message:"단어가 비어있어요." };
 
-  const kv = env.TTEUTGYOP_KV;
+  const kvRes = getKV(env);
+  const kv = kvRes.ok ? kvRes.kv : null;
   const cacheKey = `w:${q}`;
 
   if (kv){
@@ -151,13 +168,14 @@ export async function lookupWord(env, word){
     }
   }
 
-  if (!env.OPENDICT_KEY){
-    return { ok:false, status:500, message:"OPENDICT_KEY가 설정되지 않았어요." };
+  const keyRes = getOpenDictKey(env);
+  if (!keyRes.ok){
+    return { ok:false, status:500, message:keyRes.message };
   }
 
   // Search (simple) then we filter exact match in parseSearch
   const u = new URL(OPENDICT_BASE);
-  u.searchParams.set("key", env.OPENDICT_KEY);
+  u.searchParams.set("key", keyRes.key);
   u.searchParams.set("q", q);
   u.searchParams.set("req_type", "xml");
   u.searchParams.set("num", "20");
@@ -178,7 +196,7 @@ export async function lookupWord(env, word){
   // If definition empty, try view using target_code if exists (search sometimes omits def)
   if (!item.definition && item.target_code){
     const v = new URL(OPENDICT_VIEW);
-    v.searchParams.set("key", env.OPENDICT_KEY);
+    v.searchParams.set("key", keyRes.key);
     v.searchParams.set("target_code", item.target_code);
     v.searchParams.set("req_type", "xml");
     const vres = await fetchXml(v.toString());
@@ -201,7 +219,9 @@ export async function lookupWord(env, word){
 
 // Daily answer (ansv13:<dateKey>) – one per day for everyone
 export async function pickDailyAnswer(env){
-  const kv = env.TTEUTGYOP_KV;
+  const kvRes = getKV(env);
+  if (!kvRes.ok) return { ok:false, status:500, message:kvRes.message };
+  const kv = kvRes.kv;
   if (!kv) return { ok:false, status:500, message:"KV가 연결되지 않았어요(TTEUTGYOP_KV)." };
 
   const dateKey = seoulDateKey();

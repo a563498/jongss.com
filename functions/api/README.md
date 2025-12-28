@@ -20,3 +20,18 @@
 
 ## 주의
 - `/api/meta`가 JSON이 아닌 HTML을 반환하면, **Functions 배포가 실패**한 상태입니다. Deployments 로그에서 Functions 빌드 오류를 먼저 해결하세요.
+
+
+## Error 1101(Worker threw exception) 자주 원인
+- `TTEUTGYOP_KV`를 **Variables and Secrets(텍스트 변수)** 로 넣으면 안 됩니다.
+  - 그러면 코드에서 `kv.get(...)` 할 때 **문자열이라서 TypeError**가 나고 1101이 뜹니다.
+- 반드시 아래처럼 해야 합니다.
+
+### (웹 UI) KV 바인딩 연결
+Workers & Pages → Pages → (프로젝트) → Settings → **Bindings** → Add → **KV namespace**
+- Variable name: `TTEUTGYOP_KV`  (코드와 동일)
+- KV namespace: `tteutgyeop-kv` (네가 만든 네임스페이스 선택)
+
+그리고 Settings → **Variables and Secrets** 에서
+- 만약 `TTEUTGYOP_KV`가 Plaintext로 들어가 있으면 **삭제**하세요.
+- `OPENDICT_KEY`만 남기세요.

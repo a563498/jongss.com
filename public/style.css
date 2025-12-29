@@ -248,24 +248,21 @@ a:hover{color:var(--text)}
 .fxBadge{display:inline-flex;align-items:center;justify-content:center}
 
 
-/* icon button unified size */
-.iconBtn {
-  width: 44px;
-  height: 44px;
-  min-width: 44px;
-  min-height: 44px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border-radius: 12px;
-  font-size: 20px;
-  line-height: 1;
-}
-
-.iconBtn.anim {
-  width: 44px;
-  height: 44px;
-  min-width: 44px;
-  min-height: 44px;
+/* --- Icon buttons: unified hitbox (theme / anim) --- */
+.topRight .iconBtn,
+.hud .iconBtn,
+header .iconBtn,
+#themeBtn,
+#animBtn{
+  width:44px !important;
+  height:44px !important;
+  min-width:44px !important;
+  min-height:44px !important;
+  padding:0 !important;
+  display:inline-flex !important;
+  align-items:center !important;
+  justify-content:center !important;
+  border-radius:12px !important;
+  line-height:1 !important;
+  font-size:20px !important;
 }

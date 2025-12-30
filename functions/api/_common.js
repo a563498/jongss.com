@@ -61,40 +61,71 @@ export function similarityScore(guess, answer){
 export async function d1GetByWord(DB, word){
   const q = normalizeWord(word);
   const row = await DB.prepare(
-    "SELECT id, word, pos, level, definition, example, tokens, rel_tokens FROM entries WHERE word = ? LIMIT 1"
+    `SELECT e.id as id, e.word as word, e.pos as pos, e.level as level,
+            s.definition as definition, s.examples as example
+     FROM entries e
+     LEFT JOIN senses s ON s.entry_id = e.id
+     WHERE e.word = ?
+     ORDER BY s.id ASC
+     LIMIT 1`
   ).bind(q).first();
+
   if (!row) return null;
+
+  const def = (row.definition || "").trim();
+  const ex = (row.example || "").trim();
+
+  const tokens = tokenize(def);
+  const rel_tokens = tokenize(def + " " + ex);
+
   return {
     id: row.id,
     word: row.word,
     pos: row.pos||"",
     level: row.level||"",
-    definition: row.definition||"",
-    example: row.example||"",
-    tokens: JSON.parse(row.tokens||"[]"),
-    rel_tokens: JSON.parse(row.rel_tokens||"[]")
+    definition: def,
+    example: ex,
+    tokens,
+    rel_tokens
   };
 }
 
-export async function pickDailyAnswer(DB, dateKey){
-  // deterministic: dateKey -> offset -> SELECT by rowid
-  const cntRow = await DB.prepare("SELECT COUNT(*) AS c FROM entries WHERE level IN ('초급','중급','')").first();
-  const c = cntRow?.c || 0;
-  if (!c) return null;
-  const h = hash32("tteutgyeop:"+dateKey);
-  const offset = h % c;
+export async function pickDailyAnswer(DB, dayKey){
+  const seed = hash32(dayKey);
+  const totalRow = await DB.prepare(
+    "SELECT COUNT(*) as c FROM entries WHERE is_candidate = 1"
+  ).first();
+  const total = (totalRow && totalRow.c) ? Number(totalRow.c) : 0;
+  if (!total) return null;
+
+  const offset = seed % total;
+
   const row = await DB.prepare(
-    "SELECT id, word, pos, level, definition, example, tokens, rel_tokens FROM entries WHERE level IN ('초급','중급','') LIMIT 1 OFFSET ?"
+    `SELECT e.id as id, e.word as word, e.pos as pos, e.level as level,
+            s.definition as definition, s.examples as example
+     FROM entries e
+     LEFT JOIN senses s ON s.entry_id = e.id
+     WHERE e.is_candidate = 1
+     ORDER BY e.id ASC, s.id ASC
+     LIMIT 1 OFFSET ?`
   ).bind(offset).first();
+
   if (!row) return null;
+
+  const def = (row.definition || "").trim();
+  const ex = (row.example || "").trim();
+
+  const tokens = tokenize(def);
+  const rel_tokens = tokenize(def + " " + ex);
+
   return {
     id: row.id,
     word: row.word,
     pos: row.pos||"",
     level: row.level||"",
-    definition: row.definition||"",
-    example: row.example||"",
-    tokens: JSON.parse(row.tokens||"[]"),
-    rel_tokens: JSON.parse(row.rel_tokens||"[]")
+    definition: def,
+    example: ex,
+    tokens,
+    rel_tokens
   };
 }

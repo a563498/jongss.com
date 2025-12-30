@@ -36,14 +36,17 @@ export async function onRequestGet({ env, request }){
     const kv = resolveKV(env);
     const cacheKey = `saitmal:top10:${dateKey}`;
     if (kv){
-      const cached = await kv.get(cacheKey);
-      if (cached){
-        try{
-          const items = JSON.parse(cached);
-          return json({ ok:true, dateKey, items: items.slice(0, reqLimit) });
-        }catch{/* ignore */}
-      }
-    }
+  const cached = await kv.get(cacheKey);
+  if (cached){
+    try{
+      const parsed = JSON.parse(cached);
+      // v15 이전: items 배열만 저장했을 수 있음
+      const cachedAnswer = Array.isArray(parsed) ? undefined : (parsed.answer || parsed.ans);
+      const cachedItems  = Array.isArray(parsed) ? parsed : (parsed.items || []);
+      return json({ ok:true, dateKey, answer: cachedAnswer, items: cachedItems.slice(0, reqLimit) });
+    }catch{/* ignore */}
+  }
+}
 
     const ans = await getDailyAnswer(env, dateKey);
     if (!ans) return json({ ok:false, message:"정답 생성 실패" }, 500);
@@ -67,12 +70,17 @@ export async function onRequestGet({ env, request }){
     const sEx   = pickCol(sCols, ["example","ex","sample","usage","example_text"], null);
     const sOrd  = pickCol(sCols, ["sense_order","ord","order","seq","no","idx"], null);
 
+
+const senseOrder = sOrd ? `ORDER BY s.${sOrd} ASC, s.rowid ASC` : `ORDER BY s.rowid ASC`;
+const defExpr = eDef ? `e.${eDef}` : (sFk && sDef ? `(SELECT s.${sDef} FROM senses s WHERE s.${sFk}=e.${eId} ${senseOrder} LIMIT 1)` : "NULL");
+const exExpr  = eEx  ? `e.${eEx}`  : (sFk && sEx  ? `(SELECT s.${sEx}  FROM senses s WHERE s.${sFk}=e.${eId} ${senseOrder} LIMIT 1)` : "NULL");
+
     // ---- candidate query ----
     const where = [];
     const args = [];
 
     // candidates 규모 (성능/정확도 트레이드오프)
-    const SAMPLE = 5000;
+    const SAMPLE = 2000; // 후보 샘플(성능/정확도)
 
     // FTS가 있으면 후보를 더 똑똑하게 줄인다
     const hasFTS = await hasTable(env.DB, "entries_fts");
@@ -81,14 +89,14 @@ export async function onRequestGet({ env, request }){
     if (hasFTS){
       // 정답 표제어 기반으로 FTS 후보 확보 (정확도/속도 균형)
       const q = normalizeWord(ans.word||"").replace(/\s+/g," ").trim();
-      const ftsLimit = 2500;
+      const ftsLimit = 1200;
       sql = `
         SELECT e.${eId} AS id,
                e.${eWord} AS word
                ${ePos ? `, e.${ePos} AS pos` : ", NULL AS pos"}
                ${eLevel ? `, e.${eLevel} AS level` : ", NULL AS level"}
-               ${eDef ? `, e.${eDef} AS definition` : ", NULL AS definition"}
-               ${eEx  ? `, e.${eEx} AS example` : ", NULL AS example"}
+               , ${defExpr} AS definition
+               , ${exExpr} AS example
         FROM entries e
         JOIN entries_fts f ON f.rowid = e.${eId}
         WHERE f.word MATCH ?
@@ -101,8 +109,8 @@ export async function onRequestGet({ env, request }){
                e.${eWord} AS word
                ${ePos ? `, e.${ePos} AS pos` : ", NULL AS pos"}
                ${eLevel ? `, e.${eLevel} AS level` : ", NULL AS level"}
-               ${eDef ? `, e.${eDef} AS definition` : ", NULL AS definition"}
-               ${eEx  ? `, e.${eEx} AS example` : ", NULL AS example"}
+               , ${defExpr} AS definition
+               , ${exExpr} AS example
         FROM entries e
         ORDER BY RANDOM()
         LIMIT ${SAMPLE}
@@ -110,42 +118,6 @@ export async function onRequestGet({ env, request }){
     }
 
     let rows = (await env.DB.prepare(sql).bind(...args).all()).results || [];
-
-    // senses에서 정의/예문이 필요한 경우: 첫 sense를 JOIN해서 한번에 보강
-    const needSense = (!eDef && sFk && sDef) || (!eEx && sFk && sEx);
-    if (needSense && rows.length){
-      const ids = rows.map(r=>r.id).filter(Boolean);
-      // IN 절이 너무 길어지지 않게 제한
-      const chunk = ids.slice(0, 1500);
-      const placeholders = chunk.map(()=>"?").join(",");
-      const orderBy = sOrd ? `ORDER BY s.${sOrd} ASC, s.rowid ASC` : `ORDER BY s.rowid ASC`;
-      // entry당 1개 sense(가장 앞)만 가져오기 (rowid 서브쿼리)
-      const senseSql = `
-        SELECT s.${sFk} AS entry_id,
-               ${sDef ? `s.${sDef} AS definition` : "NULL AS definition"}
-               ${sEx  ? `, s.${sEx} AS example` : ", NULL AS example"}
-        FROM senses s
-        WHERE s.rowid IN (
-          SELECT s2.rowid
-          FROM senses s2
-          WHERE s2.${sFk} IN (${placeholders})
-          GROUP BY s2.${sFk}
-        )
-      `;
-      const senseRows = (await env.DB.prepare(senseSql).bind(...chunk).all()).results || [];
-      const byId = new Map();
-      for (const r of senseRows){
-        byId.set(r.entry_id, { definition: r.definition||"", example: r.example||"" });
-      }
-      rows = rows.map(r=>{
-        const s = byId.get(r.id);
-        if (s){
-          if (!r.definition) r.definition = s.definition;
-          if (!r.example) r.example = s.example;
-        }
-        return r;
-      });
-    }
 
     // ---- scoring ----
     const items = [];
@@ -169,9 +141,9 @@ export async function onRequestGet({ env, request }){
     items.sort((a,b)=> (b.percent-a.percent) || a.word.localeCompare(b.word, "ko"));
     const topAll = items.slice(0, 10);
 
-    if (kv) await kv.put(cacheKey, JSON.stringify(topAll), { expirationTtl: 60 * 60 * 24 * 2 });
+    if (kv) await kv.put(cacheKey, JSON.stringify({ answer: { word: ans.word, pos: ans.pos, level: ans.level }, items: topAll }), { expirationTtl: 60 * 60 * 24 * 2 });
 
-    return json({ ok:true, dateKey, items: topAll.slice(0, reqLimit) });
+    return json({ ok:true, dateKey, answer: { word: ans.word, pos: ans.pos, level: ans.level }, items: topAll.slice(0, reqLimit) });
   }catch(e){
     return json({ ok:false, message:"top 오류", detail:String(e && e.stack ? e.stack : e) }, 500);
   }

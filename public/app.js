@@ -313,7 +313,7 @@ function tag(text){
 }
 function fmtDelta(n){ if (n===0) return "0"; return n>0?`+${n}`:`${n}`; }
 
-async async function openTop(){
+async function openTop(){
   const modal = $("topModal");
   const body = $("topBody");
   if (!modal || !body) return;
@@ -348,7 +348,7 @@ function closeTop(){
   $("topModal")?.setAttribute("aria-hidden","true");
 }
 
-function init(){
+async function init(){
   loadState();
 
   // Theme + anim defaults
@@ -409,7 +409,7 @@ function bindHowtoModal(){
   document.addEventListener("keydown", (e)=>{ if (e.key==="Escape") shut(); });
 }
 
-async async function submit(){
+async function submit(){
   const inp = $("guessInput");
   if (!inp) return;
   const word = inp.value.trim();

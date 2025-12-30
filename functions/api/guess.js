@@ -1,4 +1,4 @@
-import { json, seoulDateKey, getDailyAnswer, d1GetByWord, similarityScore, scoreToPercent, normalizeWord } from './_common.js';
+import { json, seoulDateKey, getDailyAnswer, d1GetByWord, similarityScore, scoreToPercentScaled, getDbTop, normalizeWord } from './_common.js';
 
 export async function onRequestGet({ request, env }){
   try{
@@ -19,7 +19,10 @@ export async function onRequestGet({ request, env }){
     const isCorrect = g.word === ans.word;
 
     const score = similarityScore(g, ans);
-    const percent = scoreToPercent(score, { isCorrect });
+    // DB에서 뽑은 최고 후보(raw score)를 기준으로 %를 상대 스케일링
+    const top = await getDbTop(env, dateKey, { limit: 1 });
+    const maxRaw = top?.maxRaw || 0;
+    const percent = scoreToPercentScaled(score, maxRaw, { isCorrect });
     return json({ ok:true, data:{ word: g.word, percent, isCorrect } });
   }catch(e){
     return json({ ok:false, message:"guess 오류", detail:String(e && e.stack ? e.stack : e) }, 500);

@@ -12,6 +12,7 @@ export async function onRequestGet({ env, request }){
     return json({
       ok: true,
       dateKey,
+      answer: r.answer || null,
       items: r.items || [],
     });
   }catch(e){

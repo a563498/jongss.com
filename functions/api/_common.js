@@ -110,6 +110,9 @@ const CONCEPT = new Map([
   ["올해","연도"],["금년","연도"],["다음해","연도"],["내년","연도"],["다다음해","연도"],["내후년","연도"],["작년","연도"],["전년","연도"],
 ]);
 
+// CONCEPT 값(개념 토큰) 집합: '짧은시간' 같은 개념 겹침을 강하게 보상하기 위함
+const CONCEPT_VALUES = new Set(Array.from(new Set(Array.from(CONCEPT.values()))));
+
 function expandConcepts(tokens){
   const out = [];
   for (const t0 of (tokens||[])){
@@ -433,6 +436,16 @@ function jaccard(a, b) {
   return uni ? inter / uni : 0;
 }
 
+function overlapCoeff(a, b) {
+  const A = new Set(a || []);
+  const B = new Set(b || []);
+  if (!A.size || !B.size) return 0;
+  let inter = 0;
+  for (const x of A) if (B.has(x)) inter++;
+  const denom = Math.min(A.size, B.size);
+  return denom ? inter / denom : 0;
+}
+
 export function similarityScore(guess, answer) {
   // 표제어가 같으면 거의 동일
   const gw = normToken(guess?.word);
@@ -445,23 +458,53 @@ export function similarityScore(guess, answer) {
   const gRel = expandConcepts(guess?.rel_tokens || tokenize(guess?.example||""));
   const aRel = expandConcepts(answer?.rel_tokens || tokenize(answer?.example||""));
 
-  // 1) 정의 토큰 자카드
-  const sDef = jaccard(gDef, aDef);
-  // 2) 예문/연관 토큰 자카드
-  const sRel = jaccard(gRel, aRel);
+  // 1) 정의 토큰 유사도: Jaccard + overlap(짧은 정의/동의어에 유리)
+  const sDef = Math.max(jaccard(gDef, aDef), overlapCoeff(gDef, aDef));
+  // 2) 예문/연관 토큰 유사도
+  const sRel = Math.max(jaccard(gRel, aRel), overlapCoeff(gRel, aRel));
   // 3) 정의 텍스트의 문자 bigram cosine (표현이 달라도 가까운 문장 패턴 보정)
   const sChar = cosineBigrams(guess?.definition||"", answer?.definition||"");
   // 4) 표제어(단어) 글자 bigram
   const sW = jaccard(toBigrams(guess?.word), toBigrams(answer?.word));
   // 5) 표제어 토큰(내년/올해 등) - 조사 제거 후
-  const sWTok = jaccard(expandConcepts(tokenize(guess?.word)), expandConcepts(tokenize(answer?.word)));
+  const sWTok = Math.max(
+    jaccard(expandConcepts(tokenize(guess?.word)), expandConcepts(tokenize(answer?.word))),
+    overlapCoeff(expandConcepts(tokenize(guess?.word)), expandConcepts(tokenize(answer?.word)))
+  );
 
-  // 가중치(휴리스틱): 사람 기준 '연상되는 단어'를 더 잘 올리기 위해
-  // - 의미 토큰(정의/예문/컨셉) 비중을 높이고
-  // - 문자 유사도(문장 패턴, 철자) 비중을 낮춤
-    const score = 0.65 * sDef + 0.25 * sRel + 0.10 * sWTok;
-  // 낮은 점수(우연한 겹침)는 0%로 눌러서 납득 가능한 결과를 유지
-  return score < 0.03 ? 0 : score;
+  // 6) 개념 토큰 유사도(사람이 느끼는 연상/동의어를 크게 끌어올림)
+  const gAll = expandConcepts([
+    ...tokenize(guess?.word || ""),
+    ...(guess?.tokens || tokenize(guess?.definition || "")),
+    ...(guess?.rel_tokens || tokenize(guess?.example || "")),
+  ]);
+  const aAll = expandConcepts([
+    ...tokenize(answer?.word || ""),
+    ...(answer?.tokens || tokenize(answer?.definition || "")),
+    ...(answer?.rel_tokens || tokenize(answer?.example || "")),
+  ]);
+  const gC = gAll.filter(t => CONCEPT_VALUES.has(t));
+  const aC = aAll.filter(t => CONCEPT_VALUES.has(t));
+  const sConcept = Math.max(jaccard(gC, aC), overlapCoeff(gC, aC));
+
+  // 품사 불일치 페널티(둘 다 있을 때만)
+  let posPenalty = 1;
+  const gp = (guess?.pos || "").trim();
+  const ap = (answer?.pos || "").trim();
+  if (gp && ap && gp !== ap) posPenalty = 0.7;
+
+  // 가중치(휴리스틱): 사람 기준 '연상되는 단어' 비중을 높임
+  // - 정의/예문/컨셉 토큰 중심
+  // - 표제어 철자 유사도는 보조
+  const score = posPenalty * (
+    0.35 * sConcept +
+    0.35 * sDef +
+    0.20 * sRel +
+    0.10 * sWTok
+  );
+
+  // 낮은 점수(우연한 겹침)는 0으로 눌러서 납득 가능한 결과 유지
+  return score < 0.05 ? 0 : score;
 }
 
 // 점수를 %로 변환(낮은 점수도 0%에 눌리지 않도록 비선형 스케일)
@@ -480,6 +523,19 @@ export function scoreToPercent(score, { isCorrect = false } = {}) {
   return p;
 }
 
+// 일일 스케일(= DB에서 뽑은 Top 후보 중 최고 raw score)을 이용해 %를 상대적으로 환산
+export function scoreToPercentScaled(score, maxRaw, { isCorrect = false } = {}) {
+  if (isCorrect) return 100;
+  const s = Number.isFinite(score) ? score : 0;
+  const m = Number.isFinite(maxRaw) ? maxRaw : 0;
+  if (s <= 0 || m <= 0) return 0;
+  // 최고 후보(정답 제외)가 99%가 되도록 선형 스케일
+  let p = Math.round(99 * (s / m));
+  if (p < 0) p = 0;
+  if (p > 99) p = 99;
+  return p;
+}
+
 // ---- DB Top-N (정답 제외) 캐시 ----
 export async function getDbTop(env, dateKey, { limit = 10 } = {}) {
   if (!env?.DB) throw new Error("D1 바인딩(DB)이 없어요.");
@@ -493,7 +549,12 @@ export async function getDbTop(env, dateKey, { limit = 10 } = {}) {
       if (cached) {
         const v = JSON.parse(cached);
         if (v?.items?.length) {
-          return { dateKey, answer: v.answer || null, items: v.items.slice(0, limit) };
+          return {
+            dateKey,
+            answer: v.answer || null,
+            items: v.items.slice(0, limit),
+            maxRaw: typeof v.maxRaw === "number" ? v.maxRaw : 0,
+          };
         }
       }
     } catch {
@@ -542,22 +603,90 @@ export async function getDbTop(env, dateKey, { limit = 10 } = {}) {
   const defExpr = eDef ? `e.${eDef}` : (sFk && sDef ? `(SELECT s.${sDef} FROM senses s WHERE s.${sFk}=e.${eId} ${senseOrder} LIMIT 1)` : "NULL");
   const exExpr = eEx ? `e.${eEx}` : (sFk && sEx ? `(SELECT s.${sEx} FROM senses s WHERE s.${sFk}=e.${eId} ${senseOrder} LIMIT 1)` : "NULL");
 
-  // candidates: random sample (속도 우선)
-  const SAMPLE = 2000;
-  const sql = `
-    SELECT e.${eId} AS id,
-           e.${eWord} AS word
-           ${ePos ? `, e.${ePos} AS pos` : ", NULL AS pos"}
-           ${eLevel ? `, e.${eLevel} AS level` : ", NULL AS level"}
-           , ${defExpr} AS definition
-           , ${exExpr} AS example
-    FROM entries e
-    ORDER BY RANDOM()
-    LIMIT ${SAMPLE}
-  `;
-  const rows = (await env.DB.prepare(sql).all()).results || [];
+  // 후보군을 '정답 정의/예문' 기반으로 좁혀서(=의미적으로 가까운 단어가 있을 법한 곳) 정확도↑
+  const aTokens = Array.from(new Set(tokenize((ans.definition || "") + " " + (ans.example || ""))))
+    .filter(t => t && t.length >= 2 && t !== ans.word)
+    .slice(0, 6);
 
-  const items = [];
+  let rows = [];
+  try {
+    const params = [];
+    const whereParts = [];
+
+    // senses 테이블이 있으면 senses 정의에서 검색(정확도↑)
+    if (sFk && sDef) {
+      for (const t of aTokens) {
+        whereParts.push(`s.${sDef} LIKE ?`);
+        params.push(`%${t}%`);
+      }
+      // 토큰이 너무 적으면 fallback로 표제어 기반 후보도 조금 추가
+      if (!whereParts.length) {
+        whereParts.push(`e.${eWord} LIKE ?`);
+        params.push(`%${ans.word.slice(0, 1)}%`);
+      }
+
+      let extra = "";
+      if (ePos && (ans.pos || "").trim()) {
+        extra = ` AND e.${ePos} = ?`;
+        params.push((ans.pos || "").trim());
+      }
+
+      const sql = `
+        SELECT e.${eId} AS id,
+               e.${eWord} AS word
+               ${ePos ? `, e.${ePos} AS pos` : ", NULL AS pos"}
+               ${eLevel ? `, e.${eLevel} AS level` : ", NULL AS level"}
+               , s.${sDef} AS definition
+               ${sEx ? `, s.${sEx} AS example` : ", '' AS example"}
+        FROM entries e
+        JOIN senses s ON s.${sFk} = e.${eId}
+        WHERE (${whereParts.join(" OR ")})${extra}
+        GROUP BY e.${eId}
+        LIMIT 1500
+      `;
+      rows = (await env.DB.prepare(sql).bind(...params).all()).results || [];
+    } else {
+      // senses가 없으면 entries.definition에서 검색
+      for (const t of aTokens) {
+        whereParts.push(`${defExpr} LIKE ?`);
+        params.push(`%${t}%`);
+      }
+      const sql = `
+        SELECT e.${eId} AS id,
+               e.${eWord} AS word
+               ${ePos ? `, e.${ePos} AS pos` : ", NULL AS pos"}
+               ${eLevel ? `, e.${eLevel} AS level` : ", NULL AS level"}
+               , ${defExpr} AS definition
+               , ${exExpr} AS example
+        FROM entries e
+        WHERE (${whereParts.length ? whereParts.join(" OR ") : "1=1"})
+        LIMIT 1500
+      `;
+      rows = (await env.DB.prepare(sql).bind(...params).all()).results || [];
+    }
+  } catch {
+    rows = [];
+  }
+
+  // 후보가 너무 적으면(희귀 정의) 랜덤 샘플로 보강
+  if ((rows?.length || 0) < 250) {
+    const SAMPLE = 2500;
+    const sql2 = `
+      SELECT e.${eId} AS id,
+             e.${eWord} AS word
+             ${ePos ? `, e.${ePos} AS pos` : ", NULL AS pos"}
+             ${eLevel ? `, e.${eLevel} AS level` : ", NULL AS level"}
+             , ${defExpr} AS definition
+             , ${exExpr} AS example
+      FROM entries e
+      ORDER BY RANDOM()
+      LIMIT ${SAMPLE}
+    `;
+    const more = (await env.DB.prepare(sql2).all()).results || [];
+    rows = rows.concat(more);
+  }
+
+  const scored = [];
   for (const r of rows) {
     const w = normalizeWord(r.word);
     if (!w || w === normalizeWord(ans.word)) continue;
@@ -571,11 +700,17 @@ export async function getDbTop(env, dateKey, { limit = 10 } = {}) {
     };
 
     const score = similarityScore(guess, ans);
-    const percent = scoreToPercent(score, { isCorrect: false });
-    items.push({ word: w, percent });
+    if (score <= 0) continue;
+    scored.push({ word: w, score });
   }
 
-  items.sort((a, b) => (b.percent - a.percent) || a.word.localeCompare(b.word, "ko"));
+  // 최고 raw score로 상대 스케일링(최고 후보가 99%가 되도록)
+  let maxRaw = 0;
+  for (const it of scored) if (it.score > maxRaw) maxRaw = it.score;
+  const items = scored
+    .map(it => ({ word: it.word, percent: scoreToPercentScaled(it.score, maxRaw, { isCorrect: false }) }))
+    .sort((a, b) => (b.percent - a.percent) || a.word.localeCompare(b.word, "ko"));
+
   const topAll = items.slice(0, Math.max(10, limit));
 
   // write cache
@@ -583,7 +718,7 @@ export async function getDbTop(env, dateKey, { limit = 10 } = {}) {
     try {
       await kv.put(
         cacheKey,
-        JSON.stringify({ answer: { word: ans.word, pos: ans.pos || "", level: ans.level || "" }, items: topAll }),
+        JSON.stringify({ answer: { word: ans.word, pos: ans.pos || "", level: ans.level || "" }, maxRaw, items: topAll }),
         { expirationTtl: 60 * 60 * 24 * 2 }
       );
     } catch {
@@ -591,5 +726,10 @@ export async function getDbTop(env, dateKey, { limit = 10 } = {}) {
     }
   }
 
-  return { dateKey, answer: { word: ans.word, pos: ans.pos || "", level: ans.level || "" }, items: topAll.slice(0, limit) };
+  return {
+    dateKey,
+    answer: { word: ans.word, pos: ans.pos || "", level: ans.level || "" },
+    maxRaw,
+    items: topAll.slice(0, limit),
+  };
 }

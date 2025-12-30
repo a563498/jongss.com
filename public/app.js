@@ -409,7 +409,7 @@ function bindHowtoModal(){
   document.addEventListener("keydown", (e)=>{ if (e.key==="Escape") shut(); });
 }
 
-async function submit(){
+async async function submit(){
   const inp = $("guessInput");
   if (!inp) return;
   const word = inp.value.trim();

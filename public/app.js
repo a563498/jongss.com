@@ -344,12 +344,13 @@ async function init(){
   }
 
   // Submit handlers
-  $("submitBtn")?.addEventListener("click", submit);
-
-  // form submit(Enter) 기본 동작(페이지 새로고침) 방지
-  const form = document.querySelector("form");
+  // 폼 submit(Enter/버튼 클릭) 시 페이지 리로드를 막고, submit()만 실행
+  const form = document.getElementById("guessForm");
   form?.addEventListener("submit", (e) => { e.preventDefault(); submit(); });
-$("guessInput")?.addEventListener("keydown", (e)=>{ if (e.key==="Enter") submit(); });
+
+  // 혹시 폼 밖에서 버튼이 눌리는 경우도 대비
+  $("submitBtn")?.addEventListener("click", (e) => { e.preventDefault(); submit(); });
+  $("guessInput")?.addEventListener("keydown", (e)=>{ if (e.key==="Enter") { e.preventDefault(); submit(); } });
   $("giveupBtn")?.addEventListener("click", giveUp);
 
   // Start seasonal fx

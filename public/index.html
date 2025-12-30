@@ -17,6 +17,7 @@
       <button class="iconBtn" id="themeBtn" type="button" aria-label="테마 변경">🌙</button>
       <button id="animBtn" class="pill" title="애니메이션 켜기/끄기" type="button"><span id="animIcon">✨</span></button>
       <div class="miniStats">
+        <div class="mini"><span class="k">최고 유사</span><span class="v" id="bestNear">0%</span></div>
         <div class="mini"><span class="k">시도</span><span class="v" id="triesCount">0</span></div>
         <div class="mini"><span class="k">경과</span><span class="v" id="elapsed">00:00</span></div>
         <div class="mini"><span class="k">오늘 최고</span><span class="v" id="bestPct">0%</span></div>
@@ -98,7 +99,7 @@
         <ol class="howto">
           <li><b>단어</b>를 입력하고 <b>Enter</b> 또는 <b>추론</b>을 누르세요.</li>
           <li>각 입력은 <b>유사도(1~100%)</b>로 점수화되어 목록에 누적됩니다.</li>
-          <li>목록은 <b>유사도가 높은 순</b>으로 자동 정렬돼요. (같으면 최근 입력이 위)</li>
+          <li>목록은 기본적으로 <b>유사도가 높은 순</b>으로 정렬돼요. 다만 <b>방금 입력한 단어 1개는 맨 위</b>에 고정됩니다.</li>
           <li><b>오늘의 정답은 모두 동일</b>하고, 하루에 1개로 고정됩니다.</li>
           <li>브라우저를 껐다 켜도 <b>시도/시간/입력 기록</b>은 유지됩니다.</li>
           <li>정답이 도저히 안 보이면 <b>포기하기</b>를 눌러 확인할 수 있어요.</li>

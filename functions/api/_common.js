@@ -51,6 +51,16 @@ const SYN = new Map([
   ["작일", "어제"],
   // 기타 자주 나오는 표기
   ["대한민국", "한국"],
+  // 연도/시점
+  ["내년", "다음해"],
+  ["명년", "다음해"],
+  ["내후년", "다다음해"],
+  ["금년도", "올해"],
+  // 의미군(가벼운 정규화)
+  ["디자인", "설계"],
+  ["디자이너", "설계자"],
+  ["포토샵", "그래픽"],
+  ["일러스트", "그림"],
 ]);
 
 function normToken(t) {
@@ -65,6 +75,77 @@ export function normalizeWord(w) {
   return (w || "").trim().replace(/\s+/g, "");
 }
 
+
+const TRAIL_STRIP = [
+  "으로서","으로써","으로부터","로부터","으로","로","에서","에게서","에게","께서","께","까지","부터","만큼","같이","처럼","보다","조차","마저","라도","이나","나","이나마",
+  "으로는","로는","에는","에선","에서는","에는","에서의","의","을","를","은","는","이","가","과","와","도","만","에","로","으로","서","께","한테","한테서"
+];
+function stripParticle(tok){
+  tok = (tok||"").trim();
+  if (tok.length < 2) return tok;
+  for (const suf of TRAIL_STRIP){
+    if (tok.length > suf.length && tok.endsWith(suf)){
+      return tok.slice(0, tok.length - suf.length);
+    }
+  }
+  return tok;
+}
+
+const CONCEPT = new Map([
+  // 디자인/시각/꾸밈
+  ["꾸미다","디자인"],["꾸밈","디자인"],["장식","디자인"],["장식하다","디자인"],
+  ["그림","디자인"],["사진","디자인"],["도안","디자인"],["도면","디자인"],["미술","디자인"],["예술","디자인"],["패션","디자인"],["옷","디자인"],
+  ["컴퓨터","디자인"],["프로그램","디자인"],["그래픽","디자인"],["포토샵","디자인"],["편집","디자인"],["이미지","디자인"],
+
+  // 시간(즉시/짧은 간격)
+  ["금방","짧은시간"],["방금","짧은시간"],["곧","짧은시간"],["즉시","짧은시간"],["당장","짧은시간"],["얼른","짧은시간"],
+  ["순식간","짧은시간"],["잠시","짧은시간"],["찰나","짧은시간"],["금세","짧은시간"],["바로","짧은시간"],["즉각","짧은시간"],
+  ["당장에","짧은시간"],["순간","짧은시간"],
+
+  // 시간 개념 확장
+  ["시간","시간개념"],["순간","시간개념"],["간격","시간개념"],["기간","시간개념"],["잠깐","시간개념"],
+
+  // 시간/연도
+  ["올해","연도"],["금년","연도"],["다음해","연도"],["내년","연도"],["다다음해","연도"],["내후년","연도"],["작년","연도"],["전년","연도"],
+]);
+
+function expandConcepts(tokens){
+  const out = [];
+  for (const t0 of (tokens||[])){
+    const t = normToken(stripParticle(t0));
+    if (!t) continue;
+    out.push(t);
+    const c = CONCEPT.get(t);
+    if (c) out.push(c);
+  }
+  return out;
+}
+
+function cosineBigrams(a,b){
+  a = (a||""); b=(b||"");
+  const A = bigramCounts(a);
+  const B = bigramCounts(b);
+  let dot=0, na=0, nb=0;
+  for (const [k,v] of Object.entries(A)){ na += v*v; }
+  for (const [k,v] of Object.entries(B)){ nb += v*v; }
+  for (const [k,v] of Object.entries(A)){ if (B[k]) dot += v*B[k]; }
+  if (!na || !nb) return 0;
+  return dot / (Math.sqrt(na)*Math.sqrt(nb));
+}
+function bigramCounts(s){
+  // 한글/영문/숫자만 남기고 bigram
+  const clean = (s||"").toLowerCase().replace(/[^0-9a-z가-힣]+/g," ");
+  const grams = {};
+  for (const part of clean.split(/\s+/)){
+    if (!part) continue;
+    const arr = toBigrams(part);
+    for (const g of arr){
+      grams[g]=(grams[g]||0)+1;
+    }
+  }
+  return grams;
+}
+
 function tokenize(text) {
   text = text || "";
   const out = [];
@@ -74,7 +155,7 @@ function tokenize(text) {
     if (!w) continue;
     if (w.length === 1 && !SINGLE_KEEP.has(w)) continue;
     if (STOP.has(w)) continue;
-    out.push(normToken(w));
+    out.push(normToken(stripParticle(w)));
   }
   HANGUL_SEQ.lastIndex = 0;
   return out;
@@ -352,20 +433,46 @@ function jaccard(a, b) {
 }
 
 export function similarityScore(guess, answer) {
-  // 단어 자체 동의(정규화)면 사실상 같은 의미로 취급
+  // 표제어가 같으면 거의 동일
   const gw = normToken(guess?.word);
   const aw = normToken(answer?.word);
   if (gw && aw && gw === aw) return 1;
 
-  // 1) 정의 토큰 유사 (사람이 느끼는 의미 유사에 가장 근접)
-  const sDef = jaccard(guess?.tokens, answer?.tokens);
-  // 2) 예문/연관 토큰 유사
-  const sRel = jaccard(guess?.rel_tokens, answer?.rel_tokens);
-  // 3) 표제어(단어) 글자 빅그램 유사 (동형/부분 유사 보정)
-  const sW = jaccard(toBigrams(guess?.word), toBigrams(answer?.word));
-  // 4) 표제어 토큰(예: '내년' vs '올해'에서 '년/해') 유사
-  const sWTok = jaccard(tokenize(guess?.word), tokenize(answer?.word));
+  // 토큰(정의/연관) 확장: 조사 제거 + 컨셉 매핑
+  const gDef = expandConcepts(guess?.tokens || tokenize(guess?.definition||""));
+  const aDef = expandConcepts(answer?.tokens || tokenize(answer?.definition||""));
+  const gRel = expandConcepts(guess?.rel_tokens || tokenize(guess?.example||""));
+  const aRel = expandConcepts(answer?.rel_tokens || tokenize(answer?.example||""));
 
-  // 가중치: 정의 0.62 + 예문 0.18 + 표제어 0.12 + 표제어토큰 0.08
-  return 0.62 * sDef + 0.18 * sRel + 0.12 * sW + 0.08 * sWTok;
+  // 1) 정의 토큰 자카드
+  const sDef = jaccard(gDef, aDef);
+  // 2) 예문/연관 토큰 자카드
+  const sRel = jaccard(gRel, aRel);
+  // 3) 정의 텍스트의 문자 bigram cosine (표현이 달라도 가까운 문장 패턴 보정)
+  const sChar = cosineBigrams(guess?.definition||"", answer?.definition||"");
+  // 4) 표제어(단어) 글자 bigram
+  const sW = jaccard(toBigrams(guess?.word), toBigrams(answer?.word));
+  // 5) 표제어 토큰(내년/올해 등) - 조사 제거 후
+  const sWTok = jaccard(expandConcepts(tokenize(guess?.word)), expandConcepts(tokenize(answer?.word)));
+
+  // 가중치(휴리스틱): 사람 기준 '연상되는 단어'를 더 잘 올리기 위해
+  // - 의미 토큰(정의/예문/컨셉) 비중을 높이고
+  // - 문자 유사도(문장 패턴, 철자) 비중을 낮춤
+  return 0.55 * sDef + 0.20 * sRel + 0.10 * sWTok + 0.10 * sChar + 0.05 * sW;
+}
+
+// 점수를 %로 변환(낮은 점수도 0%에 눌리지 않도록 비선형 스케일)
+export function scoreToPercent(score, { isCorrect = false } = {}) {
+  let s = Number.isFinite(score) ? score : 0;
+  if (s < 0) s = 0;
+  if (s > 1) s = 1;
+  if (isCorrect) return 100;
+  if (s <= 0) return 0;
+
+  // 0~1을 0~100으로: pow(<1)로 저점 확장
+  let p = Math.round(100 * Math.pow(s, 0.65));
+  if (p >= 100) p = 99; // 정답 제외
+  if (p < 0) p = 0;
+  if (p > 99) p = 99;
+  return p;
 }

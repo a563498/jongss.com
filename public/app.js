@@ -266,6 +266,10 @@ async function apiJson(url, opts){
 function render(){
   $("triesCount").textContent = state.tries || 0;
   $("bestPct").textContent = `${state.best||0}%`;
+  // 정답(100%) 제외 최고 유사도 표시
+  const near = Math.max(0, ...(state.guesses||[]).filter(g=> (g?.percent??0) < 100).map(g=>g.percent||0));
+  const bestNearEl = $("bestNear");
+  if (bestNearEl) bestNearEl.textContent = `${near||0}%`;
   $("dateKey").textContent = state.dateKey || "-";
   if (state.gameOver) $("topBtn")?.classList.remove("hidden"); else $("topBtn")?.classList.add("hidden");
 
@@ -273,7 +277,18 @@ function render(){
   if (!list) return;
   list.innerHTML = "";
 
-  const items = [...(state.guesses||[])].sort((a,b)=> (b.ts-a.ts) || (b.percent-a.percent));
+  // 정렬 규칙:
+  // 1) 가장 최근 입력(마지막 입력) 1개를 맨 위에 고정
+  // 2) 그 외는 유사도 높은 순(같으면 최근 입력이 위)
+  const last = state.lastWord;
+  const pinned = [];
+  const rest = [];
+  for (const g of (state.guesses||[])){
+    if (last && g.word === last) pinned.push(g);
+    else rest.push(g);
+  }
+  rest.sort((a,b)=> (b.percent-a.percent) || (b.ts-a.ts));
+  const items = [...pinned.sort((a,b)=>b.ts-a.ts), ...rest];
   for (const g of items){
     const el = document.createElement("div");
     el.className = "item";
@@ -281,15 +296,12 @@ function render(){
     top.className = "itemTop";
 
     const left = document.createElement("div");
-    const pos = g.clues?.품사?.input ?? "";
-    const level = g.clues?.난이도?.input ?? "";
-    left.innerHTML = `<div class="word">${escapeHtml(g.word)}</div>
-      <div class="meta">${escapeHtml(pos)}${pos && level ? " · " : ""}${escapeHtml(level)}</div>`;
+    left.innerHTML = `<div class="word">${escapeHtml(g.word)}</div>`;
 
     const right = document.createElement("div");
-    right.className = "barWrap";
-    right.innerHTML = `<div class="percent">${g.percent}%</div>
-      <div class="bar"><div class="fill" style="width:${g.percent}%"></div></div>`;
+    right.className = "sim";
+    right.innerHTML = `<div class="simPct">${g.percent}%</div>
+      <div class="bar"><div class="barFill" style="width:${g.percent}%"></div></div>`;
 
     top.appendChild(left); top.appendChild(right);
     el.appendChild(top);
@@ -297,9 +309,10 @@ function render(){
     const clues = document.createElement("div");
     clues.className = "clues";
     const c = g.clues || {};
-    if (c.글자수) clues.appendChild(tag(`글자수: ${c.글자수.text} (Δ ${fmtDelta(c.글자수.delta)})`));
-    if (c.품사) clues.appendChild(tag(`품사: ${c.품사.text}`));
-    if (c.난이도) clues.appendChild(tag(`난이도: ${c.난이도.text}`));
+    if (c.글자수){
+      const t = c.글자수.text || "";
+      clues.appendChild(tag(`글자수: ${t}`));
+    }
     el.appendChild(clues);
 
     list.appendChild(el);
@@ -425,6 +438,7 @@ async function submit(){
     state.best = Math.max(state.best||0, percent);
     state.guesses = state.guesses || [];
 const now = Date.now();
+state.lastWord = d.word;
 const existing = state.guesses.find(x => x.word === d.word);
 if (existing){
   // 중복 단어는 리스트에 1번만: 더 높은 %는 보존, 최근 추론은 맨 위로 올라오게 ts 갱신
@@ -454,7 +468,7 @@ async function giveUp(){
   try{
     const r = await apiJson("/api/giveup", { method:"POST" });
     const a = r.answer || {};
-    setStatus(`포기! 정답: ${a.word||""} ${a.pos?`(${a.pos})`:""} - ${a.definition||""}`);
+    setStatus(`포기! 정답: ${a.word||""} - ${a.definition||""}`);
     state.gameOver = true;
     saveState();
     $("topBtn")?.classList.remove("hidden");

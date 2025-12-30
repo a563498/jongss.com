@@ -139,6 +139,7 @@ a:hover{color:var(--text)}
   overflow:hidden;
 }
 .barFill{height:100%}
+.barFill{background:var(--blue); width:0}
 
 .pills{display:flex; flex-wrap:wrap; gap:8px; margin-top:10px}
 .pill{

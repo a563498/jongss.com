@@ -237,13 +237,15 @@ export async function pickDailyAnswer(DB, dateKey) {
 
 export function resolveKV(env){
   // Cloudflare Pages bindings may vary by name; support legacy and current bindings.
+  // NOTE: some users set the binding name with a hyphen (e.g. "saitmal-kv"), so we also check bracket access.
   return (
     env?.SAITMAL_KV ||
-    resolveKV(env) ||
-    env?.TTEUTGYEOP_KV ||
+    env?.TTEUTGYOP_KV ||      // legacy typo (TTEUTGYOP)
+    env?.TTEUTGYEOP_KV ||     // legacy (TTEUTGYEOP)
     env?.saitmal_kv ||
     env?.["saitmal-kv"] ||
     env?.["TTEUTGYOP_KV"] ||
+    env?.["TTEUTGYEOP_KV"] ||
     env?.["SAITMAL_KV"]
   );
 }

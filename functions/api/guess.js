@@ -20,21 +20,7 @@ export async function onRequestGet({ request, env }){
 
     const score = similarityScore(g, ans);
     const percent = scoreToPercent(score, { isCorrect });
-
-    const deltaLen = g.word.length - ans.word.length;
-    const lenHint = deltaLen === 0 ? "같음" : (deltaLen > 0 ? "정답보다 김" : "정답보다 짧음");
-
-    return json({
-      ok:true,
-      data:{
-        word: g.word,
-        percent,
-        isCorrect,
-        clues:{
-          글자수: { answer: ans.word.length, input: g.word.length, delta: deltaLen, text: lenHint }
-        }
-      }
-    });
+    return json({ ok:true, data:{ word: g.word, percent, isCorrect } });
   }catch(e){
     return json({ ok:false, message:"guess 오류", detail:String(e && e.stack ? e.stack : e) }, 500);
   }

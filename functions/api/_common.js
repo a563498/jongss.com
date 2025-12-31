@@ -115,6 +115,24 @@ const COMMON = new Set([
   "어떤","이러한","그런","같은","정도","모두","모든","여러","가능","불가능",
   "하다","되다","있다","없다","위해","대한","관련","포함","가리키다","뜻하다"
 ]);
+
+// 시간/순간/즉시 계열 키워드(사람이 느끼는 '시간적 근접' 유사도 보강)
+const TIME_KW = new Set([
+  "시간","때","순간","찰나","잠시","잠깐","금방","방금","금세","곧","이내","바로","즉시","즉각","당장","얼른",
+  "지금","오늘","내일","어제","방금전","곧바로","순식간","재빨리","빨리","늦게","일찍"
+]);
+function timeKeywordScore(gAll, aAll){
+  const g = new Set((gAll||[]).filter(t=>TIME_KW.has(t)));
+  const a = new Set((aAll||[]).filter(t=>TIME_KW.has(t)));
+  if (!g.size || !a.size) return 0;
+  let inter=0;
+  for (const t of g) if (a.has(t)) inter++;
+  // 최소 1개라도 겹치면 기본 점수, 2~3개 이상 겹치면 빠르게 상승
+  const raw = (inter + 1) / 4; // 0.5, 0.75, 1.0...
+  return Math.max(0, Math.min(1, raw));
+}
+
+
 // CONCEPT 값(개념 토큰) 집합: '짧은시간' 같은 개념 겹침을 강하게 보상하기 위함
 const CONCEPT_VALUES = new Set(Array.from(new Set(Array.from(CONCEPT.values()))));
 
@@ -274,8 +292,11 @@ export async function pickDailyAnswer(DB, dateKey) {
 
   // count (가능하면 초급/중급 위주)
   let cntSql = "SELECT COUNT(*) AS c FROM entries";
-  const whereLevel = levelCol ? ` WHERE ${levelCol} IN ('초급','중급','')` : "";
-  if (levelCol) cntSql += whereLevel;
+  const baseWhere = `${wordCol} NOT LIKE '% %'`;
+  const whereLevel = levelCol
+    ? ` WHERE ${baseWhere} AND ${levelCol} IN ('초급','중급','')`
+    : ` WHERE ${baseWhere}`;
+  cntSql += whereLevel;
 
   const cntRow = await DB.prepare(cntSql).first();
   const c = cntRow?.c || 0;
@@ -294,7 +315,7 @@ export async function pickDailyAnswer(DB, dateKey) {
     hasTokens ? `rel_tokens AS rel_tokens` : `NULL AS rel_tokens`,
   ].join(", ");
 
-  const where = levelCol ? `WHERE ${levelCol} IN ('초급','중급','')` : "";
+  const where = levelCol ? `WHERE ${baseWhere} AND ${levelCol} IN ('초급','중급','')` : `WHERE ${baseWhere}`;
   const row = await DB.prepare(`SELECT ${select} FROM entries ${where} LIMIT 1 OFFSET ?`)
     .bind(offset)
     .first();
@@ -505,7 +526,16 @@ export function similarityScore(guess, answer) {
   let posPenalty = 1;
   const gp = (guess?.pos || "").trim();
   const ap = (answer?.pos || "").trim();
-  if (gp && ap && gp !== ap) posPenalty = 0.55;
+  if (gp && ap && gp !== ap) {
+    // 품사 불일치는 강하게 감점(특히 부사 vs 비부사)
+    const pair = `${gp}|${ap}`;
+    const rev = `${ap}|${gp}`;
+    if (gp === "부사" || ap === "부사") posPenalty = 0.18;
+    else if (pair === "명사|형용사" || rev === "명사|형용사") posPenalty = 0.45;
+    else if (pair === "명사|동사" || rev === "명사|동사") posPenalty = 0.35;
+    else if (pair === "동사|형용사" || rev === "동사|형용사") posPenalty = 0.55;
+    else posPenalty = 0.30;
+  }
 
   // 가중치(휴리스틱): 사람 기준 '연상되는 단어' 비중을 높임
   // - 정의/예문/컨셉 토큰 중심
@@ -518,7 +548,10 @@ export function similarityScore(guess, answer) {
   const relCap = sharedInfo >= 2 ? 1 : 0.18;
   const sDef2 = Math.min(sDef, defCap);
   const sRel2 = Math.min(sRel, relCap);
-  const score = posPenalty * (
+  // 시간 개념(오늘/내일/방금/곧/즉시...)은 사람 기준 유사도에 큰 영향을 주므로 보강
+const sTime = timeKeywordScore(gAll, aAll);
+
+const score = posPenalty * (
     0.35 * sConcept +
     0.35 * sDef2 +
     0.20 * sRel2 +
@@ -653,7 +686,7 @@ export async function getDbTop(env, dateKey, { limit = 10 } = {}) {
              , ${defExpr} AS definition
              , ${exExpr} AS example
       FROM entries e
-      WHERE e.${eWord} IN (${qs})
+      WHERE e.${eWord} NOT LIKE '% %' AND e.${eWord} IN (${qs})
     `;
     await pushRows(await env.DB.prepare(sql).bind(...inList).all());
   }
@@ -686,7 +719,7 @@ export async function getDbTop(env, dateKey, { limit = 10 } = {}) {
              , ${defExpr} AS definition
              , ${exExpr} AS example
       FROM entries e
-      WHERE (${where})
+      WHERE e.${eWord} NOT LIKE '% %' AND (${where})
       LIMIT 6000
     `;
     await pushRows(await env.DB.prepare(sql).bind(...params).all());

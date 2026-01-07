@@ -1018,25 +1018,50 @@ export function resolveRankDB(env){
 }
 
 async function ensureAnswerRankTable(rankDB){
-  // word 컬럼을 같이 저장해 lookup/join 비용을 줄임
-  const sql = `
+  // NOTE:
+  // - 이미 다른 스키마로 answer_rank를 만들어 둔 경우가 있어, IF NOT EXISTS만으로는 컬럼이 추가되지 않습니다.
+  // - 따라서 존재하는 테이블의 컬럼을 PRAGMA로 확인 후, 필요한 컬럼을 ALTER TABLE로 보강합니다.
+
+  // 1) create (new installs)
+  const createSql = `
     CREATE TABLE IF NOT EXISTS answer_rank (
       date_key TEXT NOT NULL,
       word_id INTEGER NOT NULL,
-      word TEXT NOT NULL,
       rank INTEGER NOT NULL,
-      raw REAL NOT NULL,
-      percent INTEGER NOT NULL,
+      raw REAL,
+      percent INTEGER,
+      word TEXT,
       PRIMARY KEY (date_key, word_id)
     );
-    CREATE INDEX IF NOT EXISTS idx_answer_rank_date_rank ON answer_rank (date_key, rank);
-    CREATE INDEX IF NOT EXISTS idx_answer_rank_date_word ON answer_rank (date_key, word);
   `;
-  // D1는 exec가 있을 수도/없을 수도 있으므로, 여러 statement를 분리해서 실행
-  const parts = sql.split(/;\s*\n/).map(s=>s.trim()).filter(Boolean);
-  for (const p of parts){
-    await rankDB.prepare(p).run();
-  }
+  await rankDB.prepare(createSql.trim()).run();
+
+  // 2) migrate (existing installs)
+  const cols = new Set();
+  try{
+    const info = await rankDB.prepare('PRAGMA table_info(answer_rank)').all();
+    for (const r of info?.results || []){
+      if (r?.name) cols.add(String(r.name));
+    }
+  }catch{}
+
+  // legacy support:
+  // - some earlier attempts stored score in `score` instead of `raw`
+  // - some tables omit `word` and/or `percent`
+  const addCol = async (name, type) => {
+    try{ await rankDB.prepare(`ALTER TABLE answer_rank ADD COLUMN ${name} ${type}`).run(); }
+    catch{}
+  };
+
+  if (!cols.has('word')) await addCol('word', 'TEXT');
+  if (!cols.has('percent')) await addCol('percent', 'INTEGER');
+  if (!cols.has('raw') && !cols.has('score')) await addCol('raw', 'REAL');
+
+  // 3) indexes (항상 date+rank / date+word_id 를 우선)
+  try{ await rankDB.prepare('CREATE INDEX IF NOT EXISTS idx_answer_rank_date_rank ON answer_rank (date_key, rank)').run(); }catch{}
+  try{ await rankDB.prepare('CREATE INDEX IF NOT EXISTS idx_answer_rank_date_wordid ON answer_rank (date_key, word_id)').run(); }catch{}
+  // word 컬럼이 있으면 추가 인덱스(선택)
+  try{ await rankDB.prepare('CREATE INDEX IF NOT EXISTS idx_answer_rank_date_word ON answer_rank (date_key, word)').run(); }catch{}
 }
 
 async function answerRankCount(rankDB, dateKey){
@@ -1049,10 +1074,46 @@ export async function getAnswerRankTop(env, dateKey, limit=10){
   if (!rankDB) throw new Error('D1 바인딩(DB)이 없어요.');
   await ensureAnswerRankTable(rankDB);
   const lim = Math.max(1, Math.min(5000, toInt(limit, 10)));
-  const rows = await rankDB.prepare(
-    'SELECT word, rank, percent FROM answer_rank WHERE date_key = ? ORDER BY rank ASC LIMIT ?'
-  ).bind(dateKey, lim).all();
-  return (rows?.results || []).map(r=>({ word: r.word, rank: toInt(r.rank, null), percent: toInt(r.percent, 0) }));
+
+  // detect columns
+  const info = await rankDB.prepare('PRAGMA table_info(answer_rank)').all();
+  const cols = new Set((info?.results||[]).map(r=>String(r?.name||'')).filter(Boolean));
+  const hasPercent = cols.has('percent');
+  const hasWordId = cols.has('word_id') || cols.has('entry_id') || cols.has('id');
+  const idCol = cols.has('word_id') ? 'word_id' : (cols.has('entry_id') ? 'entry_id' : (cols.has('id') ? 'id' : null));
+
+  // 1) 가장 안전한 경로: word_id가 있으면 메인 entries와 JOIN해서 word를 가져온다.
+  // (answer_rank에 word 컬럼이 있어도, 과거 스키마 불일치로 깨지는 경우가 있어 JOIN을 우선)
+  const mainDB = env?.DB;
+  if (mainDB && hasWordId && idCol){
+    const schema = await resolveSchema(mainDB);
+    const eCols = await entriesColumns(mainDB);
+    const entriesTable = schema.entries;
+    const eId = mustCol(eCols, ['word_id','id','entry_id','eid','lex_entry_id','entryid'], 'entries id');
+    const eWord = mustCol(eCols, ['display_word','word','lemma','headword','entry','hw'], 'entries word');
+    const sql = `
+      SELECT e.${eWord} AS word,
+             ar.rank AS rank,
+             ${hasPercent ? 'ar.percent' : 'NULL'} AS percent
+      FROM answer_rank ar
+      JOIN ${entriesTable} e ON e.${eId} = ar.${idCol}
+      WHERE ar.date_key = ?
+      ORDER BY ar.rank ASC
+      LIMIT ?
+    `;
+    const rows = await rankDB.prepare(sql).bind(dateKey, lim).all();
+    return (rows?.results || []).map(r=>({ word: r.word, rank: toInt(r.rank, null), percent: toInt(r.percent, 0) }));
+  }
+
+  // 2) fallback: answer_rank에 word 컬럼이 있는 경우만 사용
+  if (cols.has('word')){
+    const rows = await rankDB.prepare(
+      `SELECT word, rank, ${hasPercent ? 'percent' : 'NULL AS percent'} FROM answer_rank WHERE date_key = ? ORDER BY rank ASC LIMIT ?`
+    ).bind(dateKey, lim).all();
+    return (rows?.results || []).map(r=>({ word: r.word, rank: toInt(r.rank, null), percent: toInt(r.percent, 0) }));
+  }
+
+  return [];
 }
 
 export async function getAnswerRankByWord(env, dateKey, word){
@@ -1060,11 +1121,42 @@ export async function getAnswerRankByWord(env, dateKey, word){
   if (!rankDB) throw new Error('D1 바인딩(DB)이 없어요.');
   await ensureAnswerRankTable(rankDB);
   const w = normalizeWord(word);
-  const row = await rankDB.prepare(
-    'SELECT word, rank, percent, raw FROM answer_rank WHERE date_key = ? AND word = ? LIMIT 1'
-  ).bind(dateKey, w).first();
-  if (!row) return null;
-  return { word: row.word, rank: toInt(row.rank, null), percent: toInt(row.percent, 0), raw: Number(row.raw)||0 };
+
+  const info = await rankDB.prepare('PRAGMA table_info(answer_rank)').all();
+  const cols = new Set((info?.results||[]).map(r=>String(r?.name||'')).filter(Boolean));
+  const hasPercent = cols.has('percent');
+  const rawCol = cols.has('raw') ? 'raw' : (cols.has('score') ? 'score' : null);
+  const hasWordId = cols.has('word_id') || cols.has('entry_id') || cols.has('id');
+  const idCol = cols.has('word_id') ? 'word_id' : (cols.has('entry_id') ? 'entry_id' : (cols.has('id') ? 'id' : null));
+
+  // 1) 안전 경로: word_id가 있으면 entries에서 id를 찾고 rank를 조회
+  const mainDB = env?.DB;
+  if (mainDB && hasWordId && idCol){
+    const schema = await resolveSchema(mainDB);
+    const eCols = await entriesColumns(mainDB);
+    const entriesTable = schema.entries;
+    const eId = mustCol(eCols, ['word_id','id','entry_id','eid','lex_entry_id','entryid'], 'entries id');
+    const eWord = mustCol(eCols, ['display_word','word','lemma','headword','entry','hw'], 'entries word');
+    const entry = await mainDB.prepare(`SELECT ${eId} AS id FROM ${entriesTable} WHERE ${eWord} = ? LIMIT 1`).bind(w).first();
+    const wid = entry?.id;
+    if (!wid) return null;
+    const row = await rankDB.prepare(
+      `SELECT rank, ${hasPercent ? 'percent' : 'NULL AS percent'}, ${rawCol ? rawCol : 'NULL'} AS raw FROM answer_rank WHERE date_key = ? AND ${idCol} = ? LIMIT 1`
+    ).bind(dateKey, wid).first();
+    if (!row) return null;
+    return { word: w, rank: toInt(row.rank, null), percent: toInt(row.percent, 0), raw: Number(row.raw)||0 };
+  }
+
+  // 2) fallback: word 컬럼이 있을 때만
+  if (cols.has('word')){
+    const row = await rankDB.prepare(
+      `SELECT word, rank, ${hasPercent ? 'percent' : 'NULL AS percent'}, ${rawCol ? rawCol : 'NULL'} AS raw FROM answer_rank WHERE date_key = ? AND word = ? LIMIT 1`
+    ).bind(dateKey, w).first();
+    if (!row) return null;
+    return { word: row.word, rank: toInt(row.rank, null), percent: toInt(row.percent, 0), raw: Number(row.raw)||0 };
+  }
+
+  return null;
 }
 
 function buildKeywordList(ans){
@@ -1306,14 +1398,27 @@ export async function ensureAnswerRank(env, dateKey, { topK = 5000, candidateLim
   // 저장
   await rankDB.prepare('DELETE FROM answer_rank WHERE date_key = ?').bind(dateKey).run();
 
+  // detect rank table columns (schema may be legacy)
+  const info = await rankDB.prepare('PRAGMA table_info(answer_rank)').all();
+  const rCols = new Set((info?.results||[]).map(r=>String(r?.name||'')).filter(Boolean));
+  const idCol = rCols.has('word_id') ? 'word_id' : (rCols.has('entry_id') ? 'entry_id' : (rCols.has('id') ? 'id' : 'word_id'));
+  const rawCol = rCols.has('raw') ? 'raw' : (rCols.has('score') ? 'score' : 'raw');
+  const hasWord = rCols.has('word');
+  const hasPercent = rCols.has('percent');
+
   // batch insert
   const batchSize = 200;
   let stmts = [];
   for (const it of items){
-    stmts.push(
-      rankDB.prepare('INSERT INTO answer_rank(date_key, word_id, word, rank, raw, percent) VALUES (?,?,?,?,?,?)')
-        .bind(dateKey, it.id, it.word, it.rank, it.raw, it.percent)
-    );
+    const cols = ['date_key', idCol];
+    const qs = ['?', '?'];
+    const args = [dateKey, it.id];
+    if (hasWord){ cols.push('word'); qs.push('?'); args.push(it.word); }
+    cols.push('rank'); qs.push('?'); args.push(it.rank);
+    cols.push(rawCol); qs.push('?'); args.push(it.raw);
+    if (hasPercent){ cols.push('percent'); qs.push('?'); args.push(it.percent); }
+    const sql = `INSERT INTO answer_rank(${cols.join(',')}) VALUES (${qs.join(',')})`;
+    stmts.push(rankDB.prepare(sql).bind(...args));
     if (stmts.length >= batchSize){
       await rankDB.batch(stmts);
       stmts = [];

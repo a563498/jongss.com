@@ -50,3 +50,15 @@
 ### Added
 - `/api/top?build=1`(또는 `debug=1`) 옵션 추가
   - 랭킹 생성(`ensureAnswerRank`)을 **동기 실행**하고 결과(`build`)를 응답에 포함하여 원인 진단 가능
+
+## v1.2.2 (2026-01-08)
+
+### Fixed
+- 기존에 다른 스키마로 생성된 `answer_rank` 테이블과의 **호환성**을 강화
+  - `word` 컬럼이 없을 때 `SELECT word ...`로 실패하던 문제 해결
+  - `word_id`가 있으면 `lex_entry/entries`와 JOIN하여 표제어를 반환
+  - `raw` 대신 `score` 컬럼을 쓰는 레거시 테이블도 자동 인식
+- `answer_rank` 컬럼 부족 시 `ALTER TABLE ... ADD COLUMN`으로 자동 보강
+
+### Changed
+- `/api/meta`가 랭킹 조회 실패로 인해 초기화가 막히지 않도록, `bestDB` 계산을 best-effort로 변경

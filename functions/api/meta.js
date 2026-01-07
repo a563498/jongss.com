@@ -22,9 +22,13 @@ export async function onRequestGet(context){
       }
     } catch {}
 
-    // 이미 생성된 랭킹이 있으면 Top1의 %를 bestDB로 표시
-    const top1 = await getAnswerRankTop(env, dateKey, 1);
-    const bestDB = (top1 && top1[0]) ? (top1[0].percent || 0) : 0;
+    // 랭킹이 아직 없거나(생성 중), 스키마가 어긋난 경우에도 meta는 실패하면 안 됨
+    // bestDB는 "현재 1등 유사도" 정도의 참고값이므로 best-effort로만 시도
+    let bestDB = 0;
+    try{
+      const top1 = await getAnswerRankTop(env, dateKey, 1);
+      bestDB = (top1 && top1[0]) ? (top1[0].percent || 0) : 0;
+    }catch{}
 
     return json({
       ok: true,

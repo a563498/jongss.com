@@ -724,8 +724,8 @@ export function similarityScore(guess, answer) {
   // '의미 없는 공통어(사람/것/하다...)' 겹침으로 점수가 튀는 것을 억제
   const sharedInfo = informativeIntersection([...gDef, ...gRel], [...aDef, ...aRel]);
   // 유의미한 공통 토큰이 거의 없으면(=연관성이 약함) 정의/예문 기반 점수를 상한 처리
-  const defCap = sharedInfo >= 2 ? 1 : 0.18;
-  const relCap = sharedInfo >= 2 ? 1 : 0.18;
+  const defCap = sharedInfo >= 2 ? 1 : (sharedInfo === 1 ? 0.45 : 0.15);
+  const relCap = sharedInfo >= 2 ? 1 : (sharedInfo === 1 ? 0.45 : 0.15);
   const sDef2 = Math.min(sDef, defCap);
   const sRel2 = Math.min(sRel, relCap);
   // 시간 개념(오늘/내일/방금/곧/즉시...)은 사람 기준 유사도에 큰 영향을 주므로 보강
@@ -744,7 +744,7 @@ const score = posPenalty2 * (
 );
 
   // 낮은 점수(우연한 겹침)는 0으로 눌러서 납득 가능한 결과 유지
-  return score < 0.05 ? 0 : score;
+  return score < 0.02 ? 0 : score;
 }
 
 // 점수를 %로 변환(낮은 점수도 0%에 눌리지 않도록 비선형 스케일)
@@ -791,43 +791,101 @@ export function scoreToPercentScaled(score, maxRaw, { isCorrect = false, minRaw 
   return p;
 }
 
-// ---- DB Top-N (정답 제외) 캐시 ----
+// ---- Answer Rank (D1) ----
+// - 한 날짜(dateKey)에 대해 1회 생성
+// - 후보군(수천~수만)만 뽑아서 점수 계산 후 상위 1000개를 answer_rank에 저장
+// - /api/top, /api/guess는 answer_rank를 조회해서 빠르게 응답
 
-// ---- DB Top cache (정답 제외) ----
-// - 한 날짜에 1회 계산하고 KV에 저장
-// - guess/meta/top에서 공통 사용
+async function ensureAnswerRankTable(DB){
+  await DB.prepare(`
+    CREATE TABLE IF NOT EXISTS answer_rank (
+      date_key TEXT NOT NULL,
+      word_id INTEGER NOT NULL,
+      rank INTEGER NOT NULL,
+      score REAL NOT NULL,
+      PRIMARY KEY (date_key, word_id)
+    );
+  `).run();
+  await DB.prepare(`CREATE INDEX IF NOT EXISTS idx_answer_rank_date_rank ON answer_rank(date_key, rank);`).run();
+  await DB.prepare(`CREATE INDEX IF NOT EXISTS idx_answer_rank_date_word ON answer_rank(date_key, word_id);`).run();
+}
+
+async function getRankMeta(DB, dateKey){
+  const row = await DB.prepare(`SELECT MAX(score) AS maxRaw, MIN(score) AS minRaw, COUNT(*) AS c FROM answer_rank WHERE date_key=?`).bind(dateKey).first();
+  return {
+    count: Number(row?.c || 0),
+    maxRaw: Number(row?.maxRaw || 0),
+    minRaw: Number(row?.minRaw || 0),
+  };
+}
+
+export async function getRankForWord(env, dateKey, wordId){
+  if (!env?.DB) throw new Error("D1 바인딩(DB)이 없어요.");
+  await ensureAnswerRankTable(env.DB);
+  const r = await env.DB.prepare(`SELECT rank, score FROM answer_rank WHERE date_key=? AND word_id=? LIMIT 1`).bind(dateKey, wordId).first();
+  if (!r) return { rank: null, score: 0, percent: 0 };
+  const meta = await getRankMeta(env.DB, dateKey);
+  const percent = scoreToPercentScaled(Number(r.score||0), meta.maxRaw, { isCorrect:false, minRaw: meta.minRaw, rank: Number(r.rank||0) });
+  return { rank: Number(r.rank||null), score: Number(r.score||0), percent };
+}
+
+// ---- DB Top cache (answer_rank 기반) ----
 export async function getDbTop(env, dateKey, { limit = 10 } = {}) {
   if (!env?.DB) throw new Error("D1 바인딩(DB)이 없어요.");
   const schema = await resolveSchema(env.DB);
   const entriesTable = schema.entries;
   const sensesTable = schema.senses;
   const kv = resolveKV(env);
-  const cacheKey = `saitmal:topcache:${dateKey}`;
 
-  // 1) KV cache
-  if (kv) {
-    try {
-      const cached = await kv.get(cacheKey);
-      if (cached) {
-        const v = JSON.parse(cached);
-        if (v?.items?.length) {
-          return {
-            dateKey,
-            answer: v.answer || null,
-            maxRaw: v.maxRaw || 0,
-            items: v.items.slice(0, limit),
-            map: v.map || null,
-          };
-        }
-      }
-    } catch {
-      // ignore
-    }
+  await ensureAnswerRankTable(env.DB);
+
+  // 1) answer_rank가 이미 있으면 바로 조회
+  const meta0 = await getRankMeta(env.DB, dateKey);
+  if (meta0.count > 0) {
+    const ans = await getDailyAnswer(env, dateKey);
+    const eCols = await entriesColumns(env.DB);
+    const eId = pickCol(eCols, ["id", "entry_id", "entryid", "eid", "word_id", "wordid"], "id");
+    const eWord = pickCol(eCols, ["word", "lemma", "headword", "entry", "display_word"], "word");
+    const sql = `
+      SELECT ar.rank AS rank, ar.score AS raw, e.${eWord} AS word
+      FROM answer_rank ar
+      JOIN ${entriesTable} e ON e.${eId} = ar.word_id
+      WHERE ar.date_key = ?
+      ORDER BY ar.rank ASC
+      LIMIT ?
+    `;
+    const res = await env.DB.prepare(sql).bind(dateKey, limit).all();
+
+    const items = (res?.results || []).map(r => ({
+      rank: Number(r.rank),
+      word: r.word,
+      raw: Number(r.raw||0),
+      percent: scoreToPercentScaled(Number(r.raw||0), meta0.maxRaw, { isCorrect:false, minRaw: meta0.minRaw, rank: Number(r.rank) }),
+    }));
+
+    return {
+      dateKey,
+      answer: ans ? { word: ans.word, pos: ans.pos || null, level: ans.level || null } : null,
+      maxRaw: meta0.maxRaw,
+      items,
+    };
   }
 
-  // 2) build cache
+  // 2) 없으면 생성(=하루 1회)
+  //    - KV에 "생성 중" 락을 두고 중복 계산을 줄인다(동시 접속 대비)
+  const lockKey = `saitmal:ranklock:${dateKey}`;
+  if (kv) {
+    const locked = await kv.get(lockKey);
+    if (locked) {
+      // 누군가 이미 만들고 있는 중: 잠깐 후 재시도 대신 빈 응답(프론트는 0개면 자연스럽게 표시)
+      const ans = await getDailyAnswer(env, dateKey);
+      return { dateKey, answer: ans ? { word: ans.word, pos: ans.pos||null, level: ans.level||null } : null, maxRaw: 0, items: [] };
+    }
+    try { await kv.put(lockKey, '1', { expirationTtl: 60 }); } catch {}
+  }
+
   const ans = await getDailyAnswer(env, dateKey);
-  if (!ans) return { dateKey, answer: null, items: [], maxRaw: 0, map: null };
+  if (!ans) return { dateKey, answer: null, items: [], maxRaw: 0 };
 
   const eCols = await entriesColumns(env.DB);
   const sCols = await sensesColumns(env.DB);
@@ -849,16 +907,7 @@ export async function getDbTop(env, dateKey, { limit = 10 } = {}) {
   const defExpr = eDef ? `e.${eDef}` : (sFk && sDef && sensesTable ? `(SELECT s.${sDef} FROM ${sensesTable} s WHERE s.${sFk}=e.${eId} ${senseOrder} LIMIT 1)` : "NULL");
   const exExpr  = eEx  ? `e.${eEx}`  : (sFk && sEx  && sensesTable ? `(SELECT s.${sEx}  FROM ${sensesTable} s WHERE s.${sFk}=e.${eId} ${senseOrder} LIMIT 1)` : "NULL");
 
-  // 2-1) 개념(컨셉) 기반 seed 단어(정답과 "같은 의미군"으로 묶인 단어들)
-  const conceptKey = CONCEPT.get(ans.word) || null;
-  const seeds = [];
-  if (conceptKey) {
-    for (const [k,v] of CONCEPT.entries()){
-      if (v === conceptKey && k !== ans.word) seeds.push(k);
-    }
-  }
-
-  // 2-2) 정의/예문에서 '정보성 높은 토큰'만 추출(공통어/STOP 제거)
+  // 후보군 추출: 정답 정의/예문에서 정보성 높은 토큰
   const aTokensAll = Array.from(new Set(tokenize((ans.definition || "") + " " + (ans.example || ""))))
     .map(t => normToken(t))
     .filter(t => t && t.length >= 2 && t !== ans.word && !STOP.has(t) && !COMMON.has(t))
@@ -877,24 +926,7 @@ export async function getDbTop(env, dateKey, { limit = 10 } = {}) {
     }
   }
 
-  // (A) seed 단어: word IN (...)
-  if (seeds.length) {
-    const inList = seeds.slice(0, 40);
-    const qs = inList.map(()=>"?").join(",");
-    const sql = `
-      SELECT e.${eId} AS id,
-             e.${eWord} AS word
-             ${ePos ? `, e.${ePos} AS pos` : ", NULL AS pos"}
-             ${eLevel ? `, e.${eLevel} AS level` : ", NULL AS level"}
-             , ${defExpr} AS definition
-             , ${exExpr} AS example
-      FROM ${entriesTable} e
-      WHERE e.${eWord} NOT LIKE '% %' AND e.${eWord} IN (${qs})
-    `;
-    await pushRows(await env.DB.prepare(sql).bind(...inList).all());
-  }
-
-  // (B) 정의/예문 LIKE 검색(너무 공통적인 토큰은 제외)
+  // (A) 정의 LIKE 후보 (주의: 130만 스캔을 피하기 위해 LIMIT를 엄격히)
   if (aTokensAll.length && sensesTable && sFk && sDef) {
     const where = aTokensAll.map(()=>`s.${sDef} LIKE ?`).join(" OR ");
     const params = aTokensAll.map(t=>`%${t}%`);
@@ -908,7 +940,7 @@ export async function getDbTop(env, dateKey, { limit = 10 } = {}) {
       FROM ${sensesTable} s
       JOIN ${entriesTable} e ON e.${eId}=s.${sFk}
       WHERE e.${eWord} NOT LIKE '% %' AND (${where})
-      LIMIT 6000
+      LIMIT 12000
     `;
     await pushRows(await env.DB.prepare(sql).bind(...params).all());
   } else if (aTokensAll.length && eDef) {
@@ -923,31 +955,34 @@ export async function getDbTop(env, dateKey, { limit = 10 } = {}) {
              , ${exExpr} AS example
       FROM ${entriesTable} e
       WHERE e.${eWord} NOT LIKE '% %' AND (${where})
-      LIMIT 6000
+      LIMIT 12000
     `;
     await pushRows(await env.DB.prepare(sql).bind(...params).all());
   }
 
-  // (C) 보강 샘플(희귀 정의 / seed 없음 대비)
-  if (rows.length < 3000) {
-    const need = Math.max(0, 5000 - rows.length);
-    if (need > 0) {
-      const sql2 = `
+  // (B) 최소 후보 수 확보 실패 시: answer_pool 기반 보강(있을 때만)
+  if (rows.length < 2000 && schema.kind === 'v2' && schema.pool) {
+    const pCols = await tableColumns(env.DB, schema.pool);
+    const pidCol = pickCol(pCols, ["word_id","wordid","id","entry_id"], null);
+    const pWordCol = pickCol(pCols, ["display_word","word","lemma","headword"], null);
+    if (pidCol && pWordCol) {
+      const sql = `
         SELECT e.${eId} AS id,
                e.${eWord} AS word
                ${ePos ? `, e.${ePos} AS pos` : ", NULL AS pos"}
                ${eLevel ? `, e.${eLevel} AS level` : ", NULL AS level"}
                , ${defExpr} AS definition
                , ${exExpr} AS example
-        FROM ${entriesTable} e
-        ORDER BY RANDOM()
-        LIMIT ${need}
+        FROM ${schema.pool} p
+        JOIN ${entriesTable} e ON e.${eId}=p.${pidCol}
+        WHERE p.${pWordCol} NOT LIKE '% %'
+        LIMIT 8000
       `;
-      await pushRows(await env.DB.prepare(sql2).all());
+      await pushRows(await env.DB.prepare(sql).all());
     }
   }
 
-  // 2-3) score all candidates
+  // 점수 계산(후보군만) → 상위 1000 저장
   const scored = [];
   for (const r of rows) {
     const w = (r.word || "").trim();
@@ -962,41 +997,47 @@ export async function getDbTop(env, dateKey, { limit = 10 } = {}) {
     };
     const raw = similarityScore(g, ans);
     if (raw <= 0) continue;
-    scored.push({ word: w, raw });
+    scored.push({ id: Number(r.id), word: w, raw });
   }
 
   scored.sort((a,b)=>b.raw-a.raw);
-  const maxRaw = scored.length ? scored[0].raw : 0;
+  const top = scored.slice(0, 1000);
+  const maxRaw = top.length ? top[0].raw : 0;
+  const minRaw = top.length ? top[top.length-1].raw : 0;
 
-  // 상위 1000개 저장(랭크/빠른 조회용)
-  const minRaw = scored.length ? scored[Math.min(scored.length-1, 999)].raw : 0;
-  const topN = scored.slice(0, 1000).map((x,i)=>({
+  // insert answer_rank
+  if (top.length) {
+    // 기존 날짜 데이터가 남아있으면 정리(안전)
+    await env.DB.prepare(`DELETE FROM answer_rank WHERE date_key=?`).bind(dateKey).run();
+
+    const stmts = top.map((x,i)=> env.DB.prepare(
+      `INSERT INTO answer_rank(date_key, word_id, rank, score) VALUES (?,?,?,?)`
+    ).bind(dateKey, x.id, i+1, x.raw));
+
+    if (typeof env.DB.batch === 'function') {
+      // D1 batch 지원 시
+      for (let i=0;i<stmts.length;i+=100) {
+        await env.DB.batch(stmts.slice(i,i+100));
+      }
+    } else {
+      for (const s of stmts) await s.run();
+    }
+  }
+
+  // lock 해제
+  if (kv) { try { await kv.delete(lockKey); } catch {} }
+
+  const items = top.slice(0, limit).map((x,i)=>({
     rank: i+1,
     word: x.word,
     raw: x.raw,
     percent: scoreToPercentScaled(x.raw, maxRaw, { isCorrect:false, minRaw, rank: i+1 }),
   }));
 
-  // word -> rank/percent 맵
-  const map = {};
-  for (const it of topN) {
-    map[it.word] = { rank: it.rank, percent: it.percent, raw: it.raw };
-  }
-
-  const payload = {
+  return {
+    dateKey,
     answer: { word: ans.word, pos: ans.pos || null, level: ans.level || null },
     maxRaw,
-    items: topN,
-    map,
+    items,
   };
-
-  if (kv) {
-    try {
-      await kv.put(cacheKey, JSON.stringify(payload), { expirationTtl: 60*60*48 });
-    } catch {
-      // ignore
-    }
-  }
-
-  return { dateKey, answer: payload.answer, maxRaw, items: topN.slice(0, limit), map };
 }

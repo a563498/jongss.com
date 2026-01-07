@@ -1,4 +1,4 @@
-import { json, seoulDateKey, getDailyAnswer, d1GetByWord, similarityScore, scoreToPercentScaled, getDbTop, normalizeWord } from './_common.js';
+import { json, seoulDateKey, getDailyAnswer, d1GetByWord, similarityScore, getDbTop, normalizeWord, getRankForWord } from './_common.js';
 
 export async function onRequestGet({ request, env }){
   try{
@@ -16,14 +16,22 @@ export async function onRequestGet({ request, env }){
     const g = await d1GetByWord(env.DB, w);
     if (!g) return json({ ok:false, message:"사전에 없는 단어예요." }, 404);
 
-    const isCorrect = g.word === ans.word;
 
-    const score = similarityScore(g, ans);
-    // DB에서 뽑은 최고 후보(raw score)를 기준으로 %를 상대 스케일링
-    const top = await getDbTop(env, dateKey, { limit: 1 });
-    const maxRaw = top?.maxRaw || 0;
-    const percent = scoreToPercentScaled(score, maxRaw, { isCorrect });
-    const rank = isCorrect ? 1 : (top?.map && top.map[g.word] ? (top.map[g.word].rank || null) : null);
+    // answer_rank(일일 랭킹)가 없으면 여기서 1회 생성됩니다.
+    await getDbTop(env, dateKey, { limit: 1 });
+
+    const isCorrect = g.word === ans.word;
+    let rank = null;
+    let percent = 0;
+    if (isCorrect) {
+      rank = 1;
+      percent = 100;
+    } else {
+      const r = await getRankForWord(env, dateKey, g.id);
+      rank = r.rank;
+      percent = r.percent;
+    }
+
     return json({ ok:true, data:{ word: g.word, percent, rank, isCorrect } });
   }catch(e){
     return json({ ok:false, message:"guess 오류", detail:String(e && e.stack ? e.stack : e) }, 500);

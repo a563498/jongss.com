@@ -16,3 +16,26 @@
 
 ### UI text
 - 라이선스/출처 문구를 **우리말샘·표준국어대사전** 기준으로 변경
+
+## v1.1.0 (2026-01-08)
+
+### Added
+- D1 테이블 `answer_rank`를 코드에서 자동 생성(없으면 `CREATE TABLE IF NOT EXISTS`)
+  - `date_key`, `word_id`, `rank`, `score` 저장
+  - 인덱스: `(date_key, rank)`, `(date_key, word_id)`
+
+### Changed
+- Top(랭킹) 산출 결과를 KV가 아니라 **D1 `answer_rank`에 저장**하도록 변경
+  - 하루에 1회(최초 호출 시) 후보군(최대 12,000)만 점수 계산 → 상위 1,000개를 `answer_rank`에 저장
+  - 동시 접속 시 중복 계산을 줄이기 위해 KV 락(`saitmal:ranklock:<dateKey>`, TTL 60초) 적용
+- /api/guess는 `answer_rank` 기반으로 rank/percent를 응답(당일 랭킹이 없으면 내부에서 1회 생성)
+- 유사도 점수가 과도하게 0으로 눌리던 케이스(유의미 토큰 1개만 겹치는 단어)를 완화
+  - `sharedInfo==1`일 때 정의/예문 cap 상향
+  - 최종 0 처리 임계값을 0.05 → 0.02로 완화
+- `/api/guess`는 `answer_rank`에서 rank/percent를 조회하도록 변경
+  - (첫 요청 시 `/api/top`과 동일한 경로로 일일 랭킹이 1회 생성됨)
+
+### Fixed
+- 유사도 점수에서 '의미 토큰 1개만 겹치는 경우'가 과도하게 0%로 눌리던 현상을 완화
+  - `sharedInfo == 1`일 때 cap를 상향
+  - score floor(0으로 누르는 임계값)를 낮춰 0% 폭주를 줄임

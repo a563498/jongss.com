@@ -17,37 +17,36 @@
 ### UI text
 - 라이선스/출처 문구를 **우리말샘·표준국어대사전** 기준으로 변경
 
-## v1.1.0 (2026-01-08)
+## v1.2.0 (2026-01-08)
 
 ### Added
-- D1 테이블 `answer_rank`를 코드에서 자동 생성(없으면 `CREATE TABLE IF NOT EXISTS`)
-  - `date_key`, `word_id`, `rank`, `score` 저장
-  - 인덱스: `(date_key, rank)`, `(date_key, word_id)`
+- `answer_rank` 테이블(날짜별 TOP 랭킹 저장) 자동 생성 로직 추가
+  - `date_key, word_id, word, rank, raw, percent`
+  - 인덱스: `(date_key, rank)`, `(date_key, word)`
+- 일일 랭킹 생성 함수 `ensureAnswerRank()` 추가
+  - 정답(뜻/예문)에서 키워드 추출 → 후보군(limit) 검색 → 유사도 계산 → 상위 K개(기본 5000) 저장
+  - 환경변수로 조절 가능: `RANK_TOPK`, `RANK_CANDIDATE_LIMIT`
 
 ### Changed
-- Top(랭킹) 산출 결과를 KV가 아니라 **D1 `answer_rank`에 저장**하도록 변경
-  - 하루에 1회(최초 호출 시) 후보군(최대 12,000)만 점수 계산 → 상위 1,000개를 `answer_rank`에 저장
-  - 동시 접속 시 중복 계산을 줄이기 위해 KV 락(`saitmal:ranklock:<dateKey>`, TTL 60초) 적용
-- /api/guess는 `answer_rank` 기반으로 rank/percent를 응답(당일 랭킹이 없으면 내부에서 1회 생성)
-- 유사도 점수가 과도하게 0으로 눌리던 케이스(유의미 토큰 1개만 겹치는 단어)를 완화
-  - `sharedInfo==1`일 때 정의/예문 cap 상향
-  - 최종 0 처리 임계값을 0.05 → 0.02로 완화
-- `/api/guess`는 `answer_rank`에서 rank/percent를 조회하도록 변경
-  - (첫 요청 시 `/api/top`과 동일한 경로로 일일 랭킹이 1회 생성됨)
+- `/api/meta`와 `/api/top`이 더 이상 무거운 랭킹 계산을 동기적으로 수행하지 않도록 수정
+  - 가능한 경우 `waitUntil()`로 백그라운드에서 랭킹 생성만 킥
+- `/api/guess`는 첫 입력이 느려지지 않도록 변경
+  - `answer_rank`에 랭킹이 있으면 즉시 rank/percent 반환
+  - 없으면 즉석 유사도(`scoreToPercent`)로 percent만 반환하고, 랭킹 생성은 background로 킥
+- 토큰화/유사도에서 1음절 핵심어(예: 풀/땅/밭/논 등)를 whitelist로 유지하도록 보강
+- 낮은 유사도 점수의 0% 컷오프 임계값을 완화(0.05 → 0.01)
+
+### Notes
+- 130만 전수 비교는 Workers/D1 제약상 불가능하므로, 후보군 기반 랭킹(상위 K 저장) 구조로 게임성을 확보
+
+## v1.2.1 (2026-01-08)
 
 ### Fixed
-- 유사도 점수에서 '의미 토큰 1개만 겹치는 경우'가 과도하게 0%로 눌리던 현상을 완화
-  - `sharedInfo == 1`일 때 cap를 상향
-  - score floor(0으로 누르는 임계값)를 낮춰 0% 폭주를 줄임
+- `ensureAnswerRank()` 실패 시에도 KV 락을 **반드시 해제**하도록 `try/finally` 적용
+  - 이전에는 실패하면 락이 남아 `TOP`이 계속 빈 배열로 남을 수 있었음
+- 후보군 보강 단계에서 `ORDER BY RANDOM()`을 제거하고 **PK 기반 빠른 샘플링**으로 변경
+  - 130만+ 레코드에서 `ORDER BY RANDOM()`은 타임아웃/지연의 주요 원인이 될 수 있음
 
-## v1.1.1 (2026-01-08)
-
-### Fixed
-- KV에 저장된 **이전 버전 정답 캐시**가 정의/토큰을 포함하지 않아 `answer_rank` 생성이 0개로 끝나는 문제 해결
-  - `getDailyAnswer()`에서 캐시된 정답에 `definition/tokens`가 없으면 D1에서 재조회해 보강 후 KV를 갱신
-
-### Changed
-- 1음절 핵심어(예: **풀/땅**)가 토큰화/교집합 계산에서 누락되어 유사도가 0%로 떨어지는 현상 완화
-  - `SINGLE_KEEP` 화이트리스트 확장(지형/생활 핵심어 일부 추가)
-  - `informativeIntersection()`과 정답 토큰 추출에서 1음절 화이트리스트를 의미 있는 토큰으로 인정
-  - 최종 0 처리 임계값을 0.02 → 0.008로 조정
+### Added
+- `/api/top?build=1`(또는 `debug=1`) 옵션 추가
+  - 랭킹 생성(`ensureAnswerRank`)을 **동기 실행**하고 결과(`build`)를 응답에 포함하여 원인 진단 가능

@@ -1,15 +1,30 @@
-import { json, seoulDateKey, getDailyAnswer, getDbTop } from './_common.js';
+import { json, seoulDateKey, getDailyAnswer, ensureAnswerRank, getAnswerRankTop } from './_common.js';
 
-export async function onRequestGet({ env }){
+export async function onRequestGet(context){
+  const { env, waitUntil } = context;
   try{
-    if (!env.DB) return json({ ok:false, message:"D1 바인딩(DB)이 없어요. Pages > Settings > Bindings에서 D1을 연결하세요." }, 500);
+    if (!env.DB) {
+      return json({ ok:false, message:"D1 바인딩(DB)이 없어요. Pages > Settings > Bindings에서 D1을 연결하세요." }, 500);
+    }
+
     const dateKey = seoulDateKey();
     const ans = await getDailyAnswer(env, dateKey);
-    if (!ans) return json({ ok:false, message:"정답 생성 실패(DB에 단어가 없어요). DB 업로드를 확인하세요." }, 500);
+    if (!ans) {
+      return json({ ok:false, message:"정답 생성 실패(DB에 단어가 없어요). DB 업로드를 확인하세요." }, 500);
+    }
 
-    // 정답은 숨김 + DB 기준 Top1(정답 제외) %
-    const top = await getDbTop(env, dateKey, { limit: 1 });
-    const bestDB = (top.items && top.items[0]) ? (top.items[0].percent || 0) : 0;
+    // 랭킹 생성은 응답을 блок 하지 않도록 background로 킥(가능한 환경에서만)
+    try{
+      if (typeof waitUntil === 'function') {
+        const topK = Number(env?.RANK_TOPK || 5000);
+        const candidateLimit = Number(env?.RANK_CANDIDATE_LIMIT || 12000);
+        waitUntil(ensureAnswerRank(env, dateKey, { topK, candidateLimit }));
+      }
+    } catch {}
+
+    // 이미 생성된 랭킹이 있으면 Top1의 %를 bestDB로 표시
+    const top1 = await getAnswerRankTop(env, dateKey, 1);
+    const bestDB = (top1 && top1[0]) ? (top1[0].percent || 0) : 0;
 
     return json({
       ok: true,
@@ -19,7 +34,7 @@ export async function onRequestGet({ env }){
       answerLevel: ans.level || null,
       bestDB,
     });
-  }catch(e){
+  } catch(e) {
     return json({ ok:false, message:"meta 오류", detail:String(e && e.stack ? e.stack : e) }, 500);
   }
 }

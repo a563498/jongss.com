@@ -29,7 +29,19 @@ const HANGUL_SEQ = /[가-힣]+/g;
 const STOP = new Set(["그리고", "그래서", "하지만", "그러나", "또는", "및", "등", "것", "것들", "사람", "사람들", "경우", "때문", "위해", "대한", "관련", "있다", "없다", "하다", "되다", "하게", "하기", "했다", "했다", "한다", "된다", "이다", "이며", "이고", "이다며", "한다며", "그것", "이것", "저것", "여기", "저기", "거기", "어떤", "이러한", "그런", "저런", "같은", "말", "일", "것임", "정도", "수", "등등", "때", "동안", "사이", "이후", "이전", "전후", "모두", "모든", "각", "여러", "여러가지", "사용", "쓰다", "쓰이다", "이용", "대하다", "관한", "포함", "및또", "또한", "더", "더욱", "매우", "정말"]);
 
 // 한 글자라도 의미가 큰 토큰(연/월/일/년/해 등)
-const SINGLE_KEEP = new Set(["년", "해", "월", "일", "봄", "여름", "가을", "겨울"]);
+// 한 글자(1음절) 토큰은 노이즈가 될 수 있어 기본적으로 제거하지만,
+// 사잇말 게임 특성상 의미 있는 1음절 명사(풀/땅 등)가 유사도를 좌우하는 경우가 많습니다.
+// 따라서 아래 화이트리스트는 유지합니다.
+const SINGLE_KEEP = new Set([
+  // 시간
+  "년", "해", "월", "일", "봄", "여름", "가을", "겨울",
+  // 지형/자연/생활 핵심어
+  "풀", "땅", "밭", "논", "산", "들", "숲", "강", "물", "불", "돌",
+  // 신체/생활
+  "손", "발", "눈", "귀", "코", "입", "밥", "술", "약", "차", "집", "길",
+  // 날씨
+  "비",
+]);
 
 // 사람 기준 '유사하다'고 느끼는 대표 동의(정규화)
 const SYN = new Map([
@@ -541,7 +553,29 @@ export async function getDailyAnswer(env, dateKey) {
       const cached = await kv.get(key);
       if (cached) {
         const v = JSON.parse(cached);
-        if (v?.word) return v;
+        if (v?.word) {
+          // 이전 버전 캐시(정의/토큰 누락) 호환: 단어는 유지하되 DB에서 보강
+          const needsHydrate = !v.definition || !Array.isArray(v.tokens) || !Array.isArray(v.rel_tokens);
+          if (!needsHydrate) return v;
+
+          const full = await d1GetByWord(env.DB, v.word);
+          if (full) {
+            const hydrated = {
+              id: full.id,
+              word: full.word,
+              pos: full.pos || v.pos || "",
+              level: full.level || v.level || "",
+              definition: full.definition || "",
+              example: full.example || "",
+              tokens: full.tokens || tokenize(full.definition || ""),
+              rel_tokens: full.rel_tokens || tokenize(full.example || ""),
+            };
+            try { await kv.put(key, JSON.stringify(hydrated), { expirationTtl: 60 * 60 * 48 }); } catch {}
+            return hydrated;
+          }
+
+          // DB에서 찾지 못하면 아래에서 새로 생성
+        }
       }
     } catch {
       // ignore cache errors
@@ -655,8 +689,10 @@ function overlapCoeff(a, b) {
 
 
 function informativeIntersection(aTokens, bTokens) {
-  const a = new Set((aTokens||[]).filter(t=>t && t.length>=2 && !STOP.has(t) && !COMMON.has(t) && !CONCEPT_VALUES.has(t)));
-  const b = new Set((bTokens||[]).filter(t=>t && t.length>=2 && !STOP.has(t) && !COMMON.has(t) && !CONCEPT_VALUES.has(t)));
+  // 1음절이라도 SINGLE_KEEP에 있으면 '의미 있는 교집합'으로 인정
+  const keep = (t)=> t && ((t.length >= 2) || SINGLE_KEEP.has(t)) && !STOP.has(t) && !COMMON.has(t) && !CONCEPT_VALUES.has(t);
+  const a = new Set((aTokens||[]).filter(keep));
+  const b = new Set((bTokens||[]).filter(keep));
   let n=0;
   for (const t of a) if (b.has(t)) n++;
   return n;
@@ -744,7 +780,9 @@ const score = posPenalty2 * (
 );
 
   // 낮은 점수(우연한 겹침)는 0으로 눌러서 납득 가능한 결과 유지
-  return score < 0.02 ? 0 : score;
+  // 단, 1음절 핵심어(풀/땅 등) 때문에 의미 유사도가 낮게 계산되는 케이스를 살리기 위해
+  // 임계값을 너무 높게 두지 않는다.
+  return score < 0.008 ? 0 : score;
 }
 
 // 점수를 %로 변환(낮은 점수도 0%에 눌리지 않도록 비선형 스케일)
@@ -910,7 +948,7 @@ export async function getDbTop(env, dateKey, { limit = 10 } = {}) {
   // 후보군 추출: 정답 정의/예문에서 정보성 높은 토큰
   const aTokensAll = Array.from(new Set(tokenize((ans.definition || "") + " " + (ans.example || ""))))
     .map(t => normToken(t))
-    .filter(t => t && t.length >= 2 && t !== ans.word && !STOP.has(t) && !COMMON.has(t))
+    .filter(t => t && ((t.length >= 2) || SINGLE_KEEP.has(t)) && t !== ans.word && !STOP.has(t) && !COMMON.has(t))
     .slice(0, 6);
 
   const rows = [];

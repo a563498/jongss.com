@@ -245,31 +245,84 @@ function safeJsonArray(s) {
 }
 
 // ---------------- schema helpers ----------------
-const _cache = { entriesCols: null, sensesCols: null };
+// This project originally used `entries`/`senses`.
+// After switching to 우리말샘 + 표준국어대사전 적재본에서는
+// `lex_entry` / `answer_pool` / `answer_sense` 계열 테이블을 사용합니다.
+// UI를 바꾸지 않고 내부만 교체하기 위해 런타임에서 스키마를 자동 감지합니다.
+
+const _cache = {
+  schema: null,
+  colsByTable: new Map(),
+};
 
 async function tableColumns(DB, table) {
-  const rows = await DB.prepare(`PRAGMA table_info(${table})`).all();
+  const key = String(table);
+  if (_cache.colsByTable.has(key)) return _cache.colsByTable.get(key);
+  const rows = await DB.prepare(`PRAGMA table_info(${key})`).all();
   const set = new Set();
   for (const r of rows?.results || []) {
     if (r?.name) set.add(String(r.name));
   }
+  _cache.colsByTable.set(key, set);
   return set;
 }
 
+async function tableExists(DB, table) {
+  try {
+    // SQLite: sqlite_master is available in D1.
+    const row = await DB.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name=? LIMIT 1"
+    )
+      .bind(String(table))
+      .first();
+    return !!row?.name;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveSchema(DB) {
+  if (_cache.schema) return _cache.schema;
+
+  // v1
+  if (await tableExists(DB, "entries")) {
+    _cache.schema = {
+      kind: "v1",
+      entries: "entries",
+      senses: (await tableExists(DB, "senses")) ? "senses" : null,
+      pool: null,
+    };
+    return _cache.schema;
+  }
+
+  // v2 (우리말샘/표준국어대사전 적재본)
+  if (await tableExists(DB, "lex_entry")) {
+    _cache.schema = {
+      kind: "v2",
+      entries: "lex_entry",
+      // answer_sense preferred; some pipelines may name it lex_sense
+      senses: (await tableExists(DB, "answer_sense"))
+        ? "answer_sense"
+        : ((await tableExists(DB, "lex_sense")) ? "lex_sense" : null),
+      pool: (await tableExists(DB, "answer_pool")) ? "answer_pool" : null,
+    };
+    return _cache.schema;
+  }
+
+  throw new Error(
+    "DB 스키마를 인식할 수 없어요. (entries/lex_entry 테이블이 없습니다)"
+  );
+}
+
 async function entriesColumns(DB) {
-  if (_cache.entriesCols) return _cache.entriesCols;
-  _cache.entriesCols = await tableColumns(DB, "entries");
-  return _cache.entriesCols;
+  const s = await resolveSchema(DB);
+  return tableColumns(DB, s.entries);
 }
 
 async function sensesColumns(DB) {
-  if (_cache.sensesCols) return _cache.sensesCols;
-  try {
-    _cache.sensesCols = await tableColumns(DB, "senses");
-  } catch {
-    _cache.sensesCols = new Set();
-  }
-  return _cache.sensesCols;
+  const s = await resolveSchema(DB);
+  if (!s.senses) return new Set();
+  return tableColumns(DB, s.senses);
 }
 
 function pickCol(cols, candidates, fallback = null) {
@@ -294,12 +347,14 @@ function mustCol(cols, candidates, label) {
 
 // ---------------- senses loader (v1 schema 지원) ----------------
 async function loadSenseByEntryId(DB, entryId) {
+  const schema = await resolveSchema(DB);
   const sCols = await sensesColumns(DB);
   if (!sCols || sCols.size === 0) return { definition: "", example: "" };
 
   const fk = pickCol(
     sCols,
-    ["entry_id", "entryId", "eid", "entry", "entries_id", "entryid"],
+    // v1: entry_id 계열, v2: word_id 계열
+    ["entry_id", "entryId", "eid", "entry", "entries_id", "entryid", "word_id", "wordid"],
     null
   );
   const defCol = pickCol(
@@ -318,17 +373,85 @@ async function loadSenseByEntryId(DB, entryId) {
 
   const select = [`${defCol} AS definition`, exCol ? `${exCol} AS example` : `'' AS example`].join(", ");
   const orderBy = ord ? `ORDER BY ${ord} ASC` : "";
-  const sql = `SELECT ${select} FROM senses WHERE ${fk} = ? ${orderBy} LIMIT 1`;
+  const senseTable = schema.senses;
+  if (!senseTable) return { definition: "", example: "" };
+  const sql = `SELECT ${select} FROM ${senseTable} WHERE ${fk} = ? ${orderBy} LIMIT 1`;
   const row = await DB.prepare(sql).bind(entryId).first();
   return { definition: row?.definition || "", example: row?.example || "" };
 }
 
 // ---------------- core: pick daily answer ----------------
 export async function pickDailyAnswer(DB, dateKey) {
+  const schema = await resolveSchema(DB);
+
+  // --- v2: answer_pool이 있으면 "정답 후보"는 pool에서만 뽑는다 ---
+  // (우리말샘/표준국어대사전 적재본에서 실제 게임용 풀 테이블)
+  if (schema.kind === "v2" && schema.pool) {
+    const pCols = await tableColumns(DB, schema.pool);
+    const eCols = await entriesColumns(DB);
+
+    const pidCol = mustCol(pCols, ["word_id", "wordid", "id", "entry_id"], "pool.word_id");
+    const pWordCol = mustCol(pCols, ["display_word", "word", "lemma", "headword"], "pool.display_word");
+
+    // pool에서 단일 표제어만
+    const baseWhere = `${pWordCol} NOT LIKE '% %'`;
+    const cntRow = await DB.prepare(`SELECT COUNT(*) AS c FROM ${schema.pool} WHERE ${baseWhere}`).first();
+    const c = cntRow?.c || 0;
+    if (!c) return null;
+
+    const offset = hash32("saitmal:" + dateKey) % c;
+    const pickRow = await DB.prepare(
+      `SELECT ${pidCol} AS id, ${pWordCol} AS word FROM ${schema.pool} WHERE ${baseWhere} LIMIT 1 OFFSET ?`
+    )
+      .bind(offset)
+      .first();
+    if (!pickRow?.id || !pickRow?.word) return null;
+
+    // entries(lex_entry)에서 pos/level 등 가능하면 보강
+    const eId = pickCol(eCols, ["word_id", "wordid", "id", "entry_id", "eid"], null);
+    const eWord = pickCol(eCols, ["display_word", "word", "lemma", "headword"], null);
+    const ePos = pickCol(eCols, ["pos", "part_of_speech", "pos_name", "posNm"], null);
+    const eLevel = pickCol(eCols, ["level", "difficulty", "lvl"], null);
+
+    let pos = "";
+    let level = "";
+    if (eId && eWord && (ePos || eLevel)) {
+      const cols = [
+        ePos ? `e.${ePos} AS pos` : `'' AS pos`,
+        eLevel ? `e.${eLevel} AS level` : `'' AS level`,
+      ].join(", ");
+      const r = await DB.prepare(
+        `SELECT ${cols} FROM ${schema.entries} e WHERE e.${eId} = ? OR e.${eWord} = ? LIMIT 1`
+      )
+        .bind(pickRow.id, pickRow.word)
+        .first();
+      if (r) {
+        pos = r.pos || "";
+        level = r.level || "";
+      }
+    }
+
+    const s = await loadSenseByEntryId(DB, pickRow.id);
+    const def = s.definition || "";
+    const ex = s.example || "";
+
+    return {
+      id: pickRow.id,
+      word: pickRow.word,
+      pos,
+      level,
+      definition: def,
+      example: ex,
+      tokens: tokenize(def),
+      rel_tokens: tokenize(ex),
+    };
+  }
+
+  // --- v1: entries 테이블 기반 (기존 로직) ---
   const cols = await entriesColumns(DB);
 
-  const idCol = mustCol(cols, ["id", "entry_id", "entryId", "eid"], "id");
-  const wordCol = mustCol(cols, ["word", "lemma", "headword", "entry"], "word");
+  const idCol = mustCol(cols, ["id", "entry_id", "entryId", "eid", "word_id", "wordid"], "id");
+  const wordCol = mustCol(cols, ["word", "lemma", "headword", "entry", "display_word"], "word");
   const posCol = pickCol(cols, ["pos", "part_of_speech", "pos_name", "posNm"], null);
   const levelCol = pickCol(cols, ["level", "difficulty", "lvl"], null);
 
@@ -337,14 +460,11 @@ export async function pickDailyAnswer(DB, dateKey) {
   const hasTokens = cols.has("tokens") && cols.has("rel_tokens");
 
   // count (가능하면 초급/중급 위주)
-  let cntSql = "SELECT COUNT(*) AS c FROM entries";
   const baseWhere = `${wordCol} NOT LIKE '% %'`;
   const whereLevel = levelCol
     ? ` WHERE ${baseWhere} AND ${levelCol} IN ('초급','중급','')`
     : ` WHERE ${baseWhere}`;
-  cntSql += whereLevel;
-
-  const cntRow = await DB.prepare(cntSql).first();
+  const cntRow = await DB.prepare(`SELECT COUNT(*) AS c FROM ${schema.entries}${whereLevel}`).first();
   const c = cntRow?.c || 0;
   if (!c) return null;
 
@@ -361,8 +481,10 @@ export async function pickDailyAnswer(DB, dateKey) {
     hasTokens ? `rel_tokens AS rel_tokens` : `NULL AS rel_tokens`,
   ].join(", ");
 
-  const where = levelCol ? `WHERE ${baseWhere} AND ${levelCol} IN ('초급','중급','')` : `WHERE ${baseWhere}`;
-  const row = await DB.prepare(`SELECT ${select} FROM entries ${where} LIMIT 1 OFFSET ?`)
+  const where = levelCol
+    ? `WHERE ${baseWhere} AND ${levelCol} IN ('초급','중급','')`
+    : `WHERE ${baseWhere}`;
+  const row = await DB.prepare(`SELECT ${select} FROM ${schema.entries} ${where} LIMIT 1 OFFSET ?`)
     .bind(offset)
     .first();
   if (!row) return null;
@@ -370,7 +492,7 @@ export async function pickDailyAnswer(DB, dateKey) {
   let def = row.definition || "";
   let ex = row.example || "";
 
-  // v1 schema: definition/example가 senses에 있을 수 있음
+  // definition/example가 senses에 있을 수 있음
   if (!hasDefinition || !def || !hasExample || !ex) {
     const s = await loadSenseByEntryId(DB, row.id);
     if (!def) def = s.definition;
@@ -441,10 +563,11 @@ export async function getDailyAnswer(env, dateKey) {
 
 // ---------------- lookup ----------------
 export async function d1GetByWord(DB, word) {
+  const schema = await resolveSchema(DB);
   const q = normalizeWord(word);
   const cols = await entriesColumns(DB);
-  const idCol = mustCol(cols, ["id", "entry_id", "entryId", "eid"], "id");
-  const wordCol = mustCol(cols, ["word", "lemma", "headword", "entry"], "word");
+  const idCol = mustCol(cols, ["id", "entry_id", "entryId", "eid", "word_id", "wordid"], "id");
+  const wordCol = mustCol(cols, ["word", "lemma", "headword", "entry", "display_word"], "word");
   const posCol = pickCol(cols, ["pos", "part_of_speech", "pos_name", "posNm"], null);
   const levelCol = pickCol(cols, ["level", "difficulty", "lvl"], null);
 
@@ -463,7 +586,7 @@ export async function d1GetByWord(DB, word) {
     hasTokens ? `rel_tokens AS rel_tokens` : `NULL AS rel_tokens`,
   ].join(", ");
 
-  const row = await DB.prepare(`SELECT ${select} FROM entries WHERE ${wordCol} = ? LIMIT 1`)
+  const row = await DB.prepare(`SELECT ${select} FROM ${schema.entries} WHERE ${wordCol} = ? LIMIT 1`)
     .bind(q)
     .first();
   if (!row) return null;
@@ -675,6 +798,9 @@ export function scoreToPercentScaled(score, maxRaw, { isCorrect = false, minRaw 
 // - guess/meta/top에서 공통 사용
 export async function getDbTop(env, dateKey, { limit = 10 } = {}) {
   if (!env?.DB) throw new Error("D1 바인딩(DB)이 없어요.");
+  const schema = await resolveSchema(env.DB);
+  const entriesTable = schema.entries;
+  const sensesTable = schema.senses;
   const kv = resolveKV(env);
   const cacheKey = `saitmal:topcache:${dateKey}`;
 
@@ -706,22 +832,22 @@ export async function getDbTop(env, dateKey, { limit = 10 } = {}) {
   const eCols = await entriesColumns(env.DB);
   const sCols = await sensesColumns(env.DB);
 
-  const eId = pickCol(eCols, ["id", "entry_id", "entryid", "eid"], "id");
-  const eWord = pickCol(eCols, ["word", "lemma", "headword", "entry"], "word");
+  const eId = pickCol(eCols, ["id", "entry_id", "entryid", "eid", "word_id", "wordid"], "id");
+  const eWord = pickCol(eCols, ["word", "lemma", "headword", "entry", "display_word"], "word");
   const ePos = pickCol(eCols, ["pos", "part_of_speech", "pos_name", "posnm"], null);
   const eLevel = pickCol(eCols, ["level", "difficulty", "lvl"], null);
 
   const eDef = pickCol(eCols, ["definition", "def", "mean", "meaning", "definition_text"], null);
   const eEx = pickCol(eCols, ["example", "ex", "sample", "usage", "example_text"], null);
 
-  const sFk = pickCol(sCols, ["entry_id", "entryid", "eid", "entry", "entries_id"], null);
+  const sFk = pickCol(sCols, ["entry_id", "entryid", "eid", "entry", "entries_id", "word_id", "wordid"], null);
   const sDef = pickCol(sCols, ["definition", "def", "mean", "meaning", "sense_definition", "definition_text"], null);
   const sEx = pickCol(sCols, ["example", "ex", "sample", "usage", "example_text"], null);
   const sOrd = pickCol(sCols, ["sense_order", "ord", "order", "seq", "no", "idx"], null);
 
   const senseOrder = sOrd ? `ORDER BY s.${sOrd} ASC, s.rowid ASC` : `ORDER BY s.rowid ASC`;
-  const defExpr = eDef ? `e.${eDef}` : (sFk && sDef ? `(SELECT s.${sDef} FROM senses s WHERE s.${sFk}=e.${eId} ${senseOrder} LIMIT 1)` : "NULL");
-  const exExpr  = eEx  ? `e.${eEx}`  : (sFk && sEx  ? `(SELECT s.${sEx}  FROM senses s WHERE s.${sFk}=e.${eId} ${senseOrder} LIMIT 1)` : "NULL");
+  const defExpr = eDef ? `e.${eDef}` : (sFk && sDef && sensesTable ? `(SELECT s.${sDef} FROM ${sensesTable} s WHERE s.${sFk}=e.${eId} ${senseOrder} LIMIT 1)` : "NULL");
+  const exExpr  = eEx  ? `e.${eEx}`  : (sFk && sEx  && sensesTable ? `(SELECT s.${sEx}  FROM ${sensesTable} s WHERE s.${sFk}=e.${eId} ${senseOrder} LIMIT 1)` : "NULL");
 
   // 2-1) 개념(컨셉) 기반 seed 단어(정답과 "같은 의미군"으로 묶인 단어들)
   const conceptKey = CONCEPT.get(ans.word) || null;
@@ -762,14 +888,14 @@ export async function getDbTop(env, dateKey, { limit = 10 } = {}) {
              ${eLevel ? `, e.${eLevel} AS level` : ", NULL AS level"}
              , ${defExpr} AS definition
              , ${exExpr} AS example
-      FROM entries e
+      FROM ${entriesTable} e
       WHERE e.${eWord} NOT LIKE '% %' AND e.${eWord} IN (${qs})
     `;
     await pushRows(await env.DB.prepare(sql).bind(...inList).all());
   }
 
   // (B) 정의/예문 LIKE 검색(너무 공통적인 토큰은 제외)
-  if (aTokensAll.length && sFk && sDef) {
+  if (aTokensAll.length && sensesTable && sFk && sDef) {
     const where = aTokensAll.map(()=>`s.${sDef} LIKE ?`).join(" OR ");
     const params = aTokensAll.map(t=>`%${t}%`);
     const sql = `
@@ -779,8 +905,8 @@ export async function getDbTop(env, dateKey, { limit = 10 } = {}) {
              ${eLevel ? `, e.${eLevel} AS level` : ", NULL AS level"}
              , ${defExpr} AS definition
              , ${exExpr} AS example
-      FROM senses s
-      JOIN entries e ON e.${eId}=s.${sFk}
+      FROM ${sensesTable} s
+      JOIN ${entriesTable} e ON e.${eId}=s.${sFk}
       WHERE e.${eWord} NOT LIKE '% %' AND (${where})
       LIMIT 6000
     `;
@@ -795,7 +921,7 @@ export async function getDbTop(env, dateKey, { limit = 10 } = {}) {
              ${eLevel ? `, e.${eLevel} AS level` : ", NULL AS level"}
              , ${defExpr} AS definition
              , ${exExpr} AS example
-      FROM entries e
+      FROM ${entriesTable} e
       WHERE e.${eWord} NOT LIKE '% %' AND (${where})
       LIMIT 6000
     `;
@@ -813,7 +939,7 @@ export async function getDbTop(env, dateKey, { limit = 10 } = {}) {
                ${eLevel ? `, e.${eLevel} AS level` : ", NULL AS level"}
                , ${defExpr} AS definition
                , ${exExpr} AS example
-        FROM entries e
+        FROM ${entriesTable} e
         ORDER BY RANDOM()
         LIMIT ${need}
       `;

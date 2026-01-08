@@ -1,16 +1,20 @@
+사잇말 v1.3.2 핫픽스
 
-사잇말 v1.3.1 핫픽스 (Error 1101 수정)
+증상:
+- /api/top?build=1 실행 시
+  D1_ERROR: UNIQUE constraint failed: answer_rank.date_key, answer_rank.word_id
 
 원인:
-- D1의 batch API를 잘못 사용(env.DB.batch() builder 방식)하여 런타임 예외(TypeError)가 발생 → Error 1101
+- answer_sense_fts는 (word_id, sense_rank) 단위로 결과가 나오므로
+  동일 word_id가 여러 sense 때문에 여러 번 등장 → answer_rank에 동일 (date_key, word_id)를 중복 INSERT
 
 수정:
-- D1 공식 batch 호출 방식(env.DB.batch([...preparedStatements]))으로 변경
-- 너무 큰 batch를 피하기 위해 100개 단위로 chunk 처리
+- FTS 결과를 word_id 단위로 집계(MIN score)하여 중복 제거 후 랭킹 생성
+- JS에서도 Set으로 한 번 더 중복 방지
 
-이 ZIP에는 '수정된 파일만' 포함되어 있습니다.
+포함 파일(수정된 파일만):
 - functions/lib/rank.js
 
 적용:
-1) functions/lib/rank.js 를 프로젝트에 덮어쓰기
-2) 배포(재배포) 후 /api/top?limit=10&build=1 한 번 실행해 랭킹 생성 확인
+1) functions/lib/rank.js 덮어쓰기
+2) 재배포 후 /api/top?limit=10&build=1 다시 실행

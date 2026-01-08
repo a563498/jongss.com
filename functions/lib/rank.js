@@ -1,4 +1,3 @@
-
 export function percentFromRank(rank, TOP_K = 3000) {
   if (rank == null) return 0;
   const x = (rank - 1) / (TOP_K - 1);
@@ -37,14 +36,14 @@ export async function buildAnswerRank({ env, dateKey, answerWordId }) {
     return { ok: false, message: "MATCH 토큰 없음" };
   }
 
-  // FTS5 MATCH 문자열: "토큰1" OR "토큰2" ...
   const match = tokens.map(t => `"${t.replace(/"/g, "")}"`).join(" OR ");
 
-  // 3) FTS로 후보군 추출
+  // 3) FTS 결과는 sense 단위로 중복될 수 있으므로 word_id로 집계(MIN score)
   const rows = await env.DB.prepare(`
-    SELECT word_id, bm25(answer_sense_fts) AS score
+    SELECT word_id, MIN(bm25(answer_sense_fts)) AS score
     FROM answer_sense_fts
     WHERE answer_sense_fts MATCH ?
+    GROUP BY word_id
     ORDER BY score
     LIMIT ?
   `).bind(match, CAND_LIMIT).all();
@@ -57,24 +56,29 @@ export async function buildAnswerRank({ env, dateKey, answerWordId }) {
   await env.DB.prepare(`DELETE FROM answer_rank WHERE date_key = ?`)
     .bind(dateKey).run();
 
-  // 5) TopK insert (D1 batch는 배열 형태로만 지원)
-  const top = rows.results.slice(0, TOPK);
+  // 5) TopK insert (중복 방지: JS에서도 Set으로 2차 필터)
   const statements = [];
+  const seen = new Set();
   let rank = 1;
 
-  for (const r of top) {
+  for (const r of rows.results) {
+    if (seen.has(r.word_id)) continue;
+    seen.add(r.word_id);
+
     statements.push(
       env.DB.prepare(`
         INSERT INTO answer_rank(date_key, word_id, rank, score)
         VALUES(?,?,?,?)
       `).bind(dateKey, r.word_id, rank++, r.score)
     );
+
+    if (rank > TOPK) break;
   }
 
-  // 너무 큰 batch를 피하기 위해 100개씩 나눠 실행
+  // 100개씩 배치 실행
   for (const chunk of chunkArray(statements, 100)) {
     await env.DB.batch(chunk);
   }
 
-  return { ok: true, count: top.length };
+  return { ok: true, count: statements.length };
 }

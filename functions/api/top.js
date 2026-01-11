@@ -10,11 +10,9 @@ function json(data, status = 200) {
 export async function onRequestGet({ env, request }) {
   try {
     const url = new URL(request.url);
-    const limit = Math.max(1, Math.min(1000, Number(url.searchParams.get('limit') ?? 10)));
+    const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit') ?? 10)));
     const build = url.searchParams.get('build') === '1';
-
-    // dateKey: UTC 기준 YYYY-MM-DD
-    const dateKey = new Date().toISOString().slice(0, 10);
+    const dateKey = new Date().toISOString().slice(0, 10); // UTC YYYY-MM-DD
 
     if (build) {
       const ans = await env.DB.prepare(`
@@ -31,24 +29,15 @@ export async function onRequestGet({ env, request }) {
     }
 
     const rows = await env.DB.prepare(`
-      SELECT ar.word_id, ar.rank, ar.score,
-             le.display_word, le.pos
-      FROM answer_rank ar
-      JOIN lex_entry le ON le.entry_id = ar.word_id
-      WHERE ar.date_key = ?
-      ORDER BY ar.rank
+      SELECT word_id, rank, score, display_word, pos
+      FROM answer_rank
+      WHERE date_key = ?
+      ORDER BY rank
       LIMIT ?
     `).bind(dateKey, limit).all();
 
-    return json({
-      ok: true,
-      dateKey,
-      items: rows?.results ?? [],
-    });
+    return json({ ok: true, dateKey, items: rows?.results ?? [] });
   } catch (err) {
-    return json(
-      { ok: false, message: 'top 오류', detail: String(err?.message ?? err) },
-      500
-    );
+    return json({ ok: false, message: 'top 오류', detail: String(err?.message ?? err) }, 500);
   }
 }

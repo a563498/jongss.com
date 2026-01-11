@@ -11,9 +11,30 @@ function chunkArray(arr, size) {
   return out;
 }
 
+async function ensureAnswerRankSchema(env) {
+  const info = await env.DB.prepare(`PRAGMA table_info(answer_rank);`).all();
+  const cols = new Set((info?.results ?? []).map(r => r.name));
+
+  if (!cols.has('display_word')) {
+    try { await env.DB.prepare(`ALTER TABLE answer_rank ADD COLUMN display_word TEXT;`).run(); }
+    catch (_) {}
+  }
+  if (!cols.has('pos')) {
+    try { await env.DB.prepare(`ALTER TABLE answer_rank ADD COLUMN pos TEXT;`).run(); }
+    catch (_) {}
+  }
+
+  await env.DB.prepare(`
+    CREATE INDEX IF NOT EXISTS idx_answer_rank_date_rank_word
+    ON answer_rank(date_key, rank, word_id);
+  `).run();
+}
+
 export async function buildAnswerRank({ env, dateKey, answerWordId }) {
   const TOPK = Number(env.RANK_TOPK ?? 3000);
   const CAND_LIMIT = Number(env.RANK_CANDIDATE_LIMIT ?? 8000);
+
+  await ensureAnswerRankSchema(env);
 
   const defs = await env.DB.prepare(`
     SELECT definition FROM answer_sense WHERE word_id = ?
@@ -36,7 +57,6 @@ export async function buildAnswerRank({ env, dateKey, answerWordId }) {
 
   const match = tokens.map(t => `"${t.replace(/"/g, "")}"`).join(" OR ");
 
-  // bm25()는 집계 내부에서 직접 쓰지 말고, 서브쿼리에서 score로 만든 뒤 집계
   const rows = await env.DB.prepare(`
     SELECT word_id, MIN(score) AS score
     FROM (
@@ -50,30 +70,41 @@ export async function buildAnswerRank({ env, dateKey, answerWordId }) {
     LIMIT ?
   `).bind(match, CAND_LIMIT * 3, CAND_LIMIT).all();
 
-  if (!rows?.results?.length) {
+  const cand = rows?.results ?? [];
+  if (!cand.length) {
     return { ok: false, message: "후보군 추출 실패(0건)" };
   }
 
   await env.DB.prepare(`DELETE FROM answer_rank WHERE date_key = ?`)
     .bind(dateKey).run();
 
+  const top = cand.slice(0, TOPK);
+  const ids = top.map(r => r.word_id);
+  const meta = new Map();
+
+  for (const chunk of chunkArray(ids, 200)) {
+    const placeholders = chunk.map(() => '?').join(',');
+    const lex = await env.DB.prepare(`
+      SELECT entry_id, display_word, pos
+      FROM lex_entry
+      WHERE entry_id IN (${placeholders})
+    `).bind(...chunk).all();
+
+    for (const r of (lex?.results ?? [])) {
+      meta.set(r.entry_id, { display_word: r.display_word, pos: r.pos });
+    }
+  }
+
   const statements = [];
-  const seen = new Set();
   let rank = 1;
-
-  for (const r of rows.results) {
-    if (!r?.word_id) continue;
-    if (seen.has(r.word_id)) continue;
-    seen.add(r.word_id);
-
+  for (const r of top) {
+    const m = meta.get(r.word_id) ?? { display_word: null, pos: null };
     statements.push(
       env.DB.prepare(`
-        INSERT INTO answer_rank(date_key, word_id, rank, score)
-        VALUES(?,?,?,?)
-      `).bind(dateKey, r.word_id, rank++, r.score)
+        INSERT INTO answer_rank(date_key, word_id, rank, score, display_word, pos)
+        VALUES(?,?,?,?,?,?)
+      `).bind(dateKey, r.word_id, rank++, r.score, m.display_word, m.pos)
     );
-
-    if (rank > TOPK) break;
   }
 
   for (const chunk of chunkArray(statements, 100)) {

@@ -7,8 +7,8 @@ export async function onRequestGet(context){
     if (!env.DB) return json({ ok:false, message:"D1 바인딩(DB)이 없어요." }, 500);
 
     const url = new URL(request.url);
-    const reqLimit = Math.max(1, Math.min(200, Number(url.searchParams.get("limit") || "10")));
     const TOPK = Number(env.RANK_TOPK ?? 3000);
+    const reqLimit = Math.max(1, Math.min(200, Number(url.searchParams.get("limit") || "10")));
     const wantsBuild = (url.searchParams.get("build") === "1") || (url.searchParams.get("debug") === "1");
 
     const dateKey = seoulDateKey();
@@ -35,7 +35,7 @@ export async function onRequestGet(context){
     `).bind(dateKey, reqLimit).all();
 
     const items = (rows?.results ?? [])
-      .filter(r => (r.display_word && r.display_word !== ans.word)) // 방어: 정답이 섞여 있으면 제거
+      .filter(r => r.display_word && r.display_word !== ans.word)
       .map(r => ({
         word: r.display_word,
         rank: r.rank,

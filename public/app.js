@@ -1,4 +1,5 @@
 const APP_VERSION = "v1.0.0";
+let isComposing = false;
 /* FX */
 function rand(min,max){ return Math.random()*(max-min)+min; }
 
@@ -74,7 +75,6 @@ const THEME_KEY = "saitmal_theme";
 const ANIM_KEY = "saitmal_anim";
 
 let state = {
-let isComposing = false;
   dateKey: null,
   startAt: null,
   tries: 0,
@@ -399,22 +399,17 @@ async function init(){
   const form = document.getElementById("guessForm");
   form?.addEventListener("submit", (e) => { e.preventDefault(); submit(); });
 
-  // IME(한글) 조합 중 Enter로 submit이 '씹히는' 문제 방지
-  const gi = document.getElementById("guessInput");
+  // 혹시 폼 밖에서 버튼이 눌리는 경우도 대비
+  $("submitBtn")?.addEventListener("click", (e) => { e.preventDefault(); submit(); });
+  const gi = $("guessInput");
   gi?.addEventListener("compositionstart", ()=>{ isComposing = true; });
   gi?.addEventListener("compositionend", ()=>{ isComposing = false; });
   gi?.addEventListener("keydown", (e)=>{
-    if (e.key === "Enter" && (e.isComposing || isComposing)) {
-      // 조합 확정 Enter는 submit으로 처리하지 않음(사용자가 한 번 더 Enter)
-      e.preventDefault();
-      e.stopPropagation();
+    if (e.key==="Enter") {
+      if (e.isComposing || isComposing) { e.preventDefault(); return; }
+      e.preventDefault(); submit();
     }
   });
-
-
-  // 혹시 폼 밖에서 버튼이 눌리는 경우도 대비
-  $("submitBtn")?.addEventListener("click", (e) => { e.preventDefault(); submit(); });
-  $("guessInput")?.addEventListener("keydown", (e)=>{ if (e.key==="Enter") { e.preventDefault(); submit(); } });
   $("giveupBtn")?.addEventListener("click", giveUp);
   $("topBtn")?.addEventListener("click", openTop);
   $("topClose")?.addEventListener("click", closeTop);

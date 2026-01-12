@@ -1,12 +1,17 @@
-사잇말 통합 핫픽스 v1.4.7
+사잇말 핫픽스 v1.4.8
 
-해결:
-- /api/top?build=1 실행 시 D1 오류: "no such column: f" 수정 (FTS MATCH에서 alias 사용 금지)
-- 후보군 품질 향상: answer_pool 기준으로 표준어/활성 단어만 사용(is_active=1, is_dialect=0, is_north=0)
-- percent NULL 방어: /api/top, /api/guess에서 rank 기반 fallback 제공
-- 프론트 입력 버그: 한글 IME 조합 중 Enter 입력이 제출로 처리되며 추측이 누락되는 문제 방지
+현재 에러 해결:
+- D1_ERROR: no such column: ap.is_dialect  (answer_pool에 해당 컬럼 없음) -> 참조 제거
+- D1_ERROR: no such column: f  (FTS MATCH에서 alias 사용) -> answer_sense_fts MATCH 로 수정
+
+또한:
+- 정답은 랭킹 후보에서 제외 (top에는 정답 안 나옴)
+- 랭킹 percent는 최대 99.99, 정답 추측 시 /api/guess만 100.00 반환
+- percent NULL 방어: /api/top,/api/guess에서 percentFromRank fallback
+- 입력 누락(한글 IME Enter) 방지: compositionstart/end 처리 추가 (UI/스타일/이미지 로직은 건드리지 않음)
 
 적용:
 1) ZIP 풀기
 2) 포함 파일 덮어쓰기
-3) 배포 후 1회: /api/top?limit=30&build=1
+3) 배포
+4) 배포 후 1회: /api/top?limit=30&build=1

@@ -8,9 +8,7 @@
 - (유사도 강화) FTS(bm25) 1차 후보 + 정의문 키워드/구(2-그램) 겹침 기반 2차 리랭킹 유지.
 - (점수) percent는 score 기반(소수점 2자리)으로 계산하여 `answer_rank.percent`에 저장.
 
-## v1.4.8
-- (D1 오류) FTS MATCH에서 alias `f`를 사용하던 쿼리를 `answer_sense_fts MATCH`로 수정.
-- (스키마 호환) answer_pool에 존재하지 않는 컬럼(ap.is_dialect/ap.is_north) 참조 제거.
-- (게임 규칙) 정답은 랭킹 후보에서 제외(랭킹엔 100% 없음). 정답 추측 시에만 percent=100.00, rank=0.
-- (안정성) answer_rank.percent가 NULL인 레코드가 있어도 /api/top,/api/guess에서 percentFromRank로 fallback.
-- (프론트) 한글 IME 조합 중 Enter 제출로 추측이 누락되는 문제를 방지(compositionstart/end 처리).
+## v1.4.9
+- (랭킹 빌드) 정답 정의에서 조사/어미가 붙은 토큰을 정규화(예: 무엇인가를→무엇인가, 숨기고→숨기)하여 후보군이 0건이 되는 문제 완화.
+- (랭킹 빌드) MATCH 쿼리의 AND 조건을 완화(상위 2개만 AND, 나머지는 OR)하여 후보군 확보.
+- (프론트) 다크모드/눈/애니메이션 등 기존 UI 로직은 유지한 채, 한글 IME 조합 중 Enter 제출이 씹히는 문제만 최소 수정.

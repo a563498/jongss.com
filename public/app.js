@@ -401,15 +401,9 @@ async function init(){
 
   // 혹시 폼 밖에서 버튼이 눌리는 경우도 대비
   $("submitBtn")?.addEventListener("click", (e) => { e.preventDefault(); submit(); });
-  const gi = $("guessInput");
-  gi?.addEventListener("compositionstart", ()=>{ isComposing = true; });
-  gi?.addEventListener("compositionend", ()=>{ isComposing = false; });
-  gi?.addEventListener("keydown", (e)=>{
-    if (e.key==="Enter") {
-      if (e.isComposing || isComposing) { e.preventDefault(); return; }
-      e.preventDefault(); submit();
-    }
-  });
+  $("guessInput")?.addEventListener("compositionstart", ()=>{ isComposing = true; });
+  $("guessInput")?.addEventListener("compositionend", ()=>{ isComposing = false; });
+  $("guessInput")?.addEventListener("keydown", (e)=>{ if (e.key==="Enter") { if (e.isComposing || isComposing) { e.preventDefault(); return; } e.preventDefault(); submit(); } });
   $("giveupBtn")?.addEventListener("click", giveUp);
   $("topBtn")?.addEventListener("click", openTop);
   $("topClose")?.addEventListener("click", closeTop);

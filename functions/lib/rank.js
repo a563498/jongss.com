@@ -34,6 +34,28 @@ export function percentFromRank(rank, TOPK = 3000) {
   return pct;
 }
 
+function normalizeKoreanToken(t) {
+  if (!t) return "";
+  // keep hangul/letters/numbers only
+  let s = String(t).replace(/[^\p{Script=Hangul}\p{L}\p{N}]/gu, "").trim();
+  if (s.length < 2) return "";
+  // strip common particles/endings (very lightweight heuristic)
+  const multiSuffixes = ["려는","하는","되는","같은","있다","없다"];
+  for (const suf of multiSuffixes) {
+    if (s.endsWith(suf) && s.length - suf.length >= 2) {
+      s = s.slice(0, -suf.length);
+      break;
+    }
+  }
+  const oneSuffixes = ["을","를","이","가","은","는","에","서","로","으로","와","과","도","만","의","고","다"];
+  const last = s.slice(-1);
+  if (oneSuffixes.includes(last) && s.length >= 3) {
+    s = s.slice(0, -1);
+  }
+  if (s.length < 2) return "";
+  return s;
+}
+
 const STOPWORDS = new Set([
   '것','수','등','따위','따라','위해','대한','관련','경우','대해','때','및','또는',
   '하다','되다','있다','없다','이다','아니다','같다','된다','한다','있음','없음',
@@ -95,8 +117,8 @@ function extractCandidateTokens(defTexts) {
   for (const t of defTexts) {
     const parts = (t || '').split(/\s+/);
     for (let p of parts) {
-      p = p.replace(/[^\p{Script=Hangul}\p{L}\p{N}]/gu, '').trim();
-      if (p.length < 2) continue;
+      p = normalizeKoreanToken(p);
+      if (!p) continue;
       if (STOPWORDS.has(p)) continue;
       toks.push(p);
     }
@@ -109,7 +131,7 @@ function extractCandidatePhrases(defTexts) {
   for (const t of defTexts) {
     const parts = (t || '')
       .split(/\s+/)
-      .map(p => p.replace(/[^\p{Script=Hangul}\p{L}\p{N}]/gu, '').trim())
+      .map(p => normalizeKoreanToken(p))
       .filter(p => p.length >= 2 && !STOPWORDS.has(p));
     for (let i = 0; i < parts.length - 1; i++) {
       const a = parts[i], b = parts[i+1];
@@ -167,8 +189,8 @@ async function smartTopTokens(env, defTexts, limit = 12) {
 }
 
 function buildMatch(tokens, phrases) {
-  const andPart = tokens.slice(0, 5).map(t => `"${t.replace(/"/g, "")}"`).join(" AND ");
-  const orPartTokens = tokens.slice(5, 12);
+  const andPart = tokens.slice(0, 2).map(t => `"${t.replace(/"/g, "")}"`).join(" AND ");
+  const orPartTokens = tokens.slice(2, 12);
   const orPart = orPartTokens.length
     ? `(${orPartTokens.map(t => `"${t.replace(/"/g, "")}"`).join(" OR ")})`
     : null;

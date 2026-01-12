@@ -74,6 +74,7 @@ const THEME_KEY = "saitmal_theme";
 const ANIM_KEY = "saitmal_anim";
 
 let state = {
+let isComposing = false;
   dateKey: null,
   startAt: null,
   tries: 0,
@@ -398,6 +399,19 @@ async function init(){
   const form = document.getElementById("guessForm");
   form?.addEventListener("submit", (e) => { e.preventDefault(); submit(); });
 
+  // IME(한글) 조합 중 Enter로 submit이 '씹히는' 문제 방지
+  const gi = document.getElementById("guessInput");
+  gi?.addEventListener("compositionstart", ()=>{ isComposing = true; });
+  gi?.addEventListener("compositionend", ()=>{ isComposing = false; });
+  gi?.addEventListener("keydown", (e)=>{
+    if (e.key === "Enter" && (e.isComposing || isComposing)) {
+      // 조합 확정 Enter는 submit으로 처리하지 않음(사용자가 한 번 더 Enter)
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  });
+
+
   // 혹시 폼 밖에서 버튼이 눌리는 경우도 대비
   $("submitBtn")?.addEventListener("click", (e) => { e.preventDefault(); submit(); });
   $("guessInput")?.addEventListener("keydown", (e)=>{ if (e.key==="Enter") { e.preventDefault(); submit(); } });
@@ -424,6 +438,7 @@ function bindHowtoModal(){
 }
 
 async function submit(){
+  if (isComposing) return;
   if (state.gameOver){ setStatus('오늘 게임은 종료되었어요. 내일 다시 도전해 주세요!'); return; }
   const inp = $("guessInput");
   if (!inp) return;

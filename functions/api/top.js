@@ -1,5 +1,5 @@
 import { json, seoulDateKey, getDailyAnswer } from './_common.js';
-import { buildAnswerRank } from '../lib/rank.js';
+import { buildAnswerRank, percentFromRank } from '../lib/rank.js';
 
 export async function onRequestGet(context){
   const { env, request, waitUntil } = context;
@@ -8,6 +8,7 @@ export async function onRequestGet(context){
 
     const url = new URL(request.url);
     const reqLimit = Math.max(1, Math.min(200, Number(url.searchParams.get("limit") || "10")));
+    const TOPK = Number(env.RANK_TOPK ?? 3000);
     const wantsBuild = (url.searchParams.get("build") === "1") || (url.searchParams.get("debug") === "1");
 
     const dateKey = seoulDateKey();
@@ -33,12 +34,14 @@ export async function onRequestGet(context){
       LIMIT ?
     `).bind(dateKey, reqLimit).all();
 
-    const items = (rows?.results ?? []).map(r => ({
-      word: r.display_word,
-      rank: r.rank,
-      percent: r.percent ?? null,
-      pos: r.pos ?? null,
-    }));
+    const items = (rows?.results ?? [])
+      .filter(r => (r.display_word && r.display_word !== ans.word)) // 방어: 정답이 섞여 있으면 제거
+      .map(r => ({
+        word: r.display_word,
+        rank: r.rank,
+        percent: (typeof r.percent === 'number') ? r.percent : percentFromRank(r.rank, TOPK),
+        pos: r.pos ?? null,
+      }));
 
     const payload = {
       ok: true,

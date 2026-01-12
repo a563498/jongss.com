@@ -265,10 +265,10 @@ export async function buildAnswerRank({ env, dateKey, answerWordId, answerPos = 
     FROM (
       SELECT f.word_id, bm25(answer_sense_fts) AS score
       FROM answer_sense_fts f
-      WHERE f MATCH ?
+      WHERE answer_sense_fts MATCH ?
       LIMIT ?
     ) s
-    ${answerPos ? "JOIN answer_pool ap ON ap.word_id = s.word_id AND ap.pos = ?" : ""}
+    ${answerPos ? "JOIN answer_pool ap ON ap.word_id = s.word_id AND ap.pos = ? AND ap.is_active = 1 AND ap.is_dialect = 0 AND ap.is_north = 0" : ""}
     GROUP BY s.word_id
     ORDER BY score
     LIMIT ?

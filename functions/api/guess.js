@@ -1,4 +1,5 @@
 import { json, seoulDateKey, getDailyAnswer, normalizeWord } from './_common.js';
+import { percentFromRank } from '../lib/rank.js';
 
 export async function onRequestGet({ env, request }) {
   try {
@@ -36,7 +37,8 @@ export async function onRequestGet({ env, request }) {
     `).bind(dateKey, row.word_id).first();
 
     const rank = ar?.rank ?? null;
-    const percent = (ar?.percent ?? 0);
+    const TOPK = Number(env.RANK_TOPK ?? 3000);
+    const percent = (typeof ar?.percent === 'number') ? ar.percent : (rank ? percentFromRank(rank, TOPK) : 0);
 
     return json({ ok:true, data:{ word: row.display_word ?? word, percent, rank, isCorrect:false } });
   } catch (err) {
